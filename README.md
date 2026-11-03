@@ -51,6 +51,8 @@ docker compose up -d --build --wait
 - [Agent Service 阅读顺序](docs/agent-service-reading.md)
 - [模拟支付与 AI 额度](docs/payment-service.md)
 - [Sentinel 限流与熔断](docs/sentinel.md)
+- [Agent 行为观测与 Jaeger](docs/agent-observability.md)
+- [RAG 检索与空库行为](docs/rag.md)
 - [开源资源与 License](docs/open-source-and-licenses.md)
 - [早期 Terra Java 后端模板 Prompt](docs/history/2026-09-29-pre-development/terra-backend-template-prompt.md)
 - [手部资产复现说明](tools/README.md)
@@ -59,9 +61,10 @@ docker compose up -d --build --wait
 
 当前已实现 Base/Image/History 业务、独立 Payment 模拟购买与权益、AI 每日额度、Gateway 路由与 JWT 过滤、Sentinel 入站限流及权益查询熔断、Agent 编排与国产/OpenAI 兼容模型和搜索适配。
 
-- 真实 Nacos 部署联调、供应商 API、图片后台预处理和 RAG 尚未验证或实现。
+- Agent 已接入阶段观测、脱敏执行记录、Actuator 指标和可选 Jaeger；RAG 已实现只读检索与空库分支，尚未导入真实资料。
+- 真实 Nacos 部署联调、供应商 API、PostgreSQL/pgvector 检索和图片后台预处理尚未完成实际环境验证。
 - Sentinel 已通过真实引擎和本机 HTTP 测试，演示阈值未做容量压测；本机 HTTP stub 不代表完整部署链路已验证。
 - 图片后台处理的设计为数据库状态与定时任务；应用当前未接 RabbitMQ，不引入 Outbox/Inbox。Compose 中保留 RabbitMQ 容器不代表应用已经使用 MQ。
-- AI SQL（含每日额度 V002）与 History V003 标记为 **NOT APPLIED**，Payment SQL 也需显式执行。Compose 不会自动执行这些迁移，请先阅读数据库说明并按需应用。
+- AI SQL（含每日额度 V002）与 History V003/V004 标记为 **NOT APPLIED**，Payment SQL 也需显式执行。Compose 不会自动执行这些迁移，请先阅读数据库说明并按需应用。
 
 本地密钥、环境变量文件、用户图片、数据库卷、构建产物和个人简历不随源码发布。示例中的默认账号密码仅用于本机学习，公开部署前必须替换。

@@ -60,7 +60,7 @@ public class ModelCall {
     /** 应用追踪标识。 */
     private String traceId;
 
-    /** 外部模型请求耗时，毫秒。 */
+    /** 本轮执行总耗时（图片解析、检索、下载、模型及校验），毫秒；纯模型耗时见 model_request span。 */
     private Integer latencyMs;
 
     /** 平台提供的输入 token 数，不支持统计时为空。 */

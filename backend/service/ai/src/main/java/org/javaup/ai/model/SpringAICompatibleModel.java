@@ -13,9 +13,15 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
+
 import org.javaup.ai.api.dto.AgentEnums.AgentBehavior;
 import org.javaup.ai.api.dto.AgentQuestion;
 import org.javaup.ai.api.problem.ApiException;
+import org.javaup.ai.observability.AgentTelemetry;
+import org.javaup.ai.rag.KnowledgeRetrievalService;
+import org.javaup.ai.rag.KnowledgeSearchReport;
 import org.javaup.ai.search.SearchTool;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -27,6 +33,7 @@ import org.springframework.ai.content.Media;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.HttpStatus;
@@ -44,17 +51,27 @@ public class SpringAICompatibleModel {
     private final AgentModelProperties properties;
     private final ObjectMapper mapper;
     private final SearchTool search;
+    private final AgentTelemetry telemetry;
+    private final ObservationRegistry observationRegistry;
+    private final KnowledgeRetrievalService knowledge;
     private final String systemInstruction;
     private final Map<String, ChatModel> clients = new ConcurrentHashMap<>();
 
+    @Autowired
     public SpringAICompatibleModel(
             AgentModelProperties properties,
             ObjectMapper mapper,
-            SearchTool search
+            SearchTool search,
+            AgentTelemetry telemetry,
+            ObservationRegistry observationRegistry,
+            KnowledgeRetrievalService knowledge
     ) {
         this.properties = properties;
         this.mapper = mapper;
         this.search = search;
+        this.telemetry = telemetry;
+        this.observationRegistry = observationRegistry;
+        this.knowledge = knowledge;
 
         try {
             this.systemInstruction =
@@ -65,18 +82,56 @@ public class SpringAICompatibleModel {
         }
     }
 
+    /** 独立模型适配测试可不创建数据库；生产构造始终注入真实检索服务。 */
+    public SpringAICompatibleModel(
+            AgentModelProperties properties,
+            ObjectMapper mapper,
+            SearchTool search,
+            AgentTelemetry telemetry,
+            ObservationRegistry observationRegistry
+    ) {
+        this(properties, mapper, search, telemetry, observationRegistry, KnowledgeRetrievalService.disabled());
+    }
+
     public AgentModelResult analyze(
             AgentModelRequest request,
             AgentModelProperties.Profile profile
     ) {
+        KnowledgeSearchReport knowledgeReport = telemetry.observe("knowledge_retrieval", () -> {
+            KnowledgeSearchReport result = knowledge.retrieve(request.inputSnapshot());
+            Observation current = observationRegistry.getCurrentObservation();
+
+            if (current != null) {
+                current.lowCardinalityKeyValue("status", result.status().name().toLowerCase(Locale.ROOT));
+                current.highCardinalityKeyValue("source.count", Integer.toString(result.references().size()));
+            }
+
+            return result;
+        });
         // 每次最多检索一次；失败明确报告，不伪装为有证据的联网结果。
-        SearchTool.SearchReport report = search.search(search.queryFor(request.inputSnapshot()));
+        SearchTool.SearchReport report = telemetry.observe("web_search", () -> {
+            SearchTool.SearchReport result = search.search(search.queryFor(request.inputSnapshot()));
+            Observation current = observationRegistry.getCurrentObservation();
+
+            if (current != null) {
+                String status = !result.available() ? "unavailable"
+                        : result.references().isEmpty() ? "empty" : "available";
+                current.lowCardinalityKeyValue("status", status);
+                current.highCardinalityKeyValue("source.count", Integer.toString(result.references().size()));
+            }
+
+            return result;
+        });
         BeanOutputConverter<AgentDecision> converter = new BeanOutputConverter<>(AgentDecision.class);
         String body = mapper.writeValueAsString(Map.of(
                 "locale", request.locale(),
                 "initialInput", request.inputSnapshot(),
                 "currentState", request.state(),
                 "activeBranch", request.history(),
+                "knowledge", Map.of(
+                        "status", knowledgeReport.status(),
+                        "note", knowledgeReport.note(),
+                        "references", knowledgeSources(knowledgeReport)),
                 "search", report));
 
         if (body.length() > properties.getMaxInputChars()) {
@@ -88,46 +143,89 @@ public class SpringAICompatibleModel {
 
         UserMessage user = UserMessage.builder()
                 .text(body)
-                .media(loadPictures(request.pictures()))
+                .media(telemetry.observe("image_download", () -> loadPictures(request.pictures())))
                 .build();
         String instruction = systemInstruction + "\n" + converter.getFormat();
-        ChatResponse response;
+        ChatResponse response = telemetry.observe(
+                "model_request",
+                Map.of("provider", request.provider(), "model", profile.getModel()),
+                () -> {
+                    try {
+                        return model(request.provider(), profile)
+                                .call(new Prompt(List.of(new SystemMessage(instruction), user)));
+                    } catch (RuntimeException failure) {
+                        throw new ApiException(
+                                HttpStatus.BAD_GATEWAY,
+                                MODEL_CALL_FAILED,
+                                "The selected model request failed; no result was accepted.");
+                    }
+                });
 
-        try {
-            response =
-                    model(request.provider(), profile)
-                            .call(new Prompt(List.of(new SystemMessage(instruction), user)));
-        } catch (RuntimeException failure) {
-            throw new ApiException(
-                    HttpStatus.BAD_GATEWAY,
-                    MODEL_CALL_FAILED,
-                    "The selected model request failed; no result was accepted.");
-        }
+        Usage usage = response == null || response.getMetadata() == null
+                ? null : response.getMetadata().getUsage();
+        Integer inputTokens = usage == null ? null : usage.getPromptTokens();
+        Integer outputTokens = usage == null ? null : usage.getCompletionTokens();
+        Integer totalTokens = usage == null ? null : usage.getTotalTokens();
+        // 输出校验失败也可能已经消耗token；在业务结果校验前记录平台提供的用量。
+        telemetry.recordTokens(request.provider(), profile.getModel(), inputTokens, outputTokens);
+        AgentDecision decision = telemetry.observe("output_validation", () -> {
+            if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
+                throw invalidOutput();
+            }
 
-        if (response.getResult() == null || response.getResult().getOutput() == null) {
-            throw invalidOutput();
-        }
-
-        AgentDecision decision;
-
-        try {
-            decision = validate(
-                    converter.convert(Objects.requireNonNull(response.getResult().getOutput().getText())),
-                    report.references());
-        } catch (ApiException failure) {
-            throw failure;
-        } catch (RuntimeException malformed) {
-            throw invalidOutput();
-        }
-
-        Usage usage = response.getMetadata().getUsage();
+            try {
+                return validate(
+                        converter.convert(Objects.requireNonNull(response.getResult().getOutput().getText())),
+                        verifiedSources(report, knowledgeReport));
+            } catch (ApiException failure) {
+                throw failure;
+            } catch (RuntimeException malformed) {
+                throw invalidOutput();
+            }
+        });
 
         return new AgentModelResult(
                 decision,
                 response.getMetadata().getId(),
-                usage.getPromptTokens(),
-                usage.getCompletionTokens(),
-                usage.getTotalTokens());
+                inputTokens,
+                outputTokens,
+                totalTokens);
+    }
+
+    /** 来源来自实际工具响应；知识资料没有公网 URL 时仍保留文档和片段 ID。 */
+    private List<AgentDecision.Reference> verifiedSources(
+            SearchTool.SearchReport searchReport,
+            KnowledgeSearchReport knowledgeReport
+    ) {
+        List<AgentDecision.Reference> references = new ArrayList<>(searchReport.references());
+        references.addAll(knowledgeSources(knowledgeReport));
+        return List.copyOf(references);
+    }
+
+    private List<AgentDecision.Reference> knowledgeSources(KnowledgeSearchReport knowledgeReport) {
+        return knowledgeReport.references().stream().map(source -> new AgentDecision.Reference(
+                source.title(),
+                publicSourceUrl(source.sourceUri()),
+                source.content(),
+                "KNOWLEDGE",
+                source.documentId(),
+                source.chunkId(),
+                source.contentVersion())).toList();
+    }
+
+    private String publicSourceUrl(String sourceUri) {
+        if (sourceUri == null || sourceUri.isBlank()) {
+            return null;
+        }
+
+        try {
+            URI uri = URI.create(sourceUri);
+            return List.of("http", "https").contains(uri.getScheme())
+                    && uri.getHost() != null && uri.getUserInfo() == null
+                    ? sourceUri : null;
+        } catch (IllegalArgumentException malformed) {
+            return null;
+        }
     }
 
     private ChatModel model(
@@ -149,7 +247,10 @@ public class SpringAICompatibleModel {
                     })
                     .build();
 
-            return OpenAiChatModel.builder().options(options).build();
+            return OpenAiChatModel.builder()
+                    .options(options)
+                    .observationRegistry(observationRegistry)
+                    .build();
         });
     }
 
@@ -298,7 +399,7 @@ public class SpringAICompatibleModel {
                     question.required());
         }
 
-        // 来源只能来自本轮真正获取的检索响应；忽略模型自行编造的URL。
+        // 来源由本轮工具结果重建，不接受模型生成的地址、文档或片段 ID。
         return new AgentDecision(
                 decision.behavior(),
                 decision.message(),

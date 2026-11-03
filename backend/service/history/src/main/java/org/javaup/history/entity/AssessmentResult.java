@@ -35,6 +35,10 @@ public class AssessmentResult {
     @TableField("warning_signs")
     private PGobject warningSigns;
 
+    /** 实际采用的联网/知识库来源快照，API 字段名为 references。 */
+    @TableField("source_references")
+    private PGobject sourceReferences;
+
     private String generatedBy;
 
     private String generatorReference;

@@ -74,6 +74,18 @@ Docker images and package versions are pinned in the Compose file or lockfile, w
 - Constraint: adds bundle/runtime complexity to a deliberately small point/circle/freehand editor, and its WeChat integration would still need uni-app lifecycle/device verification.
 - Decision: use native Canvas 2D first. Reconsider if future requirements grow to editing many shapes, transforms, labels and complex selection handles.
 
+## Backend observability and retrieval additions
+
+| Component | License | Use |
+| --- | --- | --- |
+| [Spring AI](https://github.com/spring-projects/spring-ai) | Apache-2.0 | Chat/embedding protocol adapters and native observations |
+| [Micrometer](https://github.com/micrometer-metrics/micrometer) | Apache-2.0 | Metrics, Observation and tracing bridge |
+| [OpenTelemetry Java](https://github.com/open-telemetry/opentelemetry-java) | Apache-2.0 | W3C traces and optional OTLP export |
+| [Jaeger](https://github.com/jaegertracing/jaeger) | Apache-2.0 | Optional local trace collector and UI, pinned to 2.22.0 |
+| [pgvector](https://github.com/pgvector/pgvector) | PostgreSQL License | Optional exact vector retrieval in the existing AI database |
+
+Jaeger runs as an optional container; no Jaeger source code is copied into the application. Maven dependency versions and their notices remain owned by upstream. No third-party knowledge corpus is redistributed in this change.
+
 ## Resource acceptance rules
 
 Before adding or replacing a model, image, icon set or library:

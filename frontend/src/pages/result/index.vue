@@ -9,6 +9,9 @@ import { formatSymptoms } from '@/utils/symptoms'
 import { formatOnset } from '@/utils/onset'
 
 const assessment = ref<Assessment>()
+function copySource(url?: string | null) {
+  if (url && /^https?:\/\//i.test(url)) uni.setClipboardData({ data: url })
+}
 const levelLabel = computed(() => {
   const level = assessment.value?.result?.recommendationLevel
   if (level === 'URGENT') return '建议立即寻求专业帮助'
@@ -32,7 +35,7 @@ onLoad(async (options) => {
     <view class="hero hero--compact">
       <text class="eyebrow">整理完成</text>
       <text class="title title--small">这次情况已经更清楚了</text>
-      <text class="subtitle">下面是根据结构化输入和 Mock 追问生成的信息摘要。</text>
+      <text class="subtitle">下面是根据你的结构化输入与追问回答整理的信息摘要。</text>
     </view>
 
     <view v-if="assessment?.result" class="result-card">
@@ -63,6 +66,17 @@ onLoad(async (options) => {
       <text class="advice__text">{{ assessment.result.suggestedNextActions.join('；') }}</text>
     </view>
 
+    <view v-if="assessment?.result?.references?.length" class="card">
+      <text class="card-title">本轮检索资料</text>
+      <text class="reference-hint">这些是本轮检索到的参考资料，不代表对你个人情况的诊断。</text>
+      <view v-for="(source, index) in assessment.result.references" :key="source.chunkId || source.url || index" class="reference">
+        <text class="reference-title">{{ source.title }}</text>
+        <text class="reference-hint">{{ source.sourceType === 'KNOWLEDGE' ? '知识资料' : '公开网页' }}{{ source.contentVersion ? ` · ${source.contentVersion}` : '' }}</text>
+        <text v-if="source.excerpt" class="reference-excerpt">{{ source.excerpt }}</text>
+        <text v-if="source.url && /^https?:\/\//i.test(source.url)" class="reference-link" @tap="copySource(source.url)">复制来源链接</text>
+      </view>
+    </view>
+
     <view class="notice">{{ assessment?.result?.safetyNotice || '本结果用于帮助你向医生、康复师或教练更准确地描述情况，不构成诊断或治疗建议。' }}</view>
     <view class="sticky-actions">
       <button class="secondary-button" @tap="go('/pages/history/index')">查看历史</button>
@@ -90,4 +104,9 @@ onLoad(async (options) => {
 .advice--attention { border-left-color: #d27e21; background: #fff3df; color: #754d17; }
 .advice__title { display: block; margin-bottom: 9rpx; font-size: 28rpx; font-weight: 750; }
 .advice__text { display: block; font-size: 24rpx; line-height: 1.65; }
+.reference { margin-top: 20rpx; padding-top: 16rpx; border-top: 1rpx solid #e3eae7; }
+.reference-title { display: block; font-size: 25rpx; font-weight: 600; }
+.reference-hint { display: block; margin-top: 6rpx; color: #60736b; font-size: 21rpx; line-height: 1.6; }
+.reference-excerpt { display: block; margin-top: 10rpx; font-size: 23rpx; line-height: 1.7; }
+.reference-link { display: block; margin-top: 12rpx; color: #147461; font-size: 23rpx; }
 </style>

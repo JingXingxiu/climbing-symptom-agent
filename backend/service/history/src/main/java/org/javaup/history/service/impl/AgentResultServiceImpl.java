@@ -185,6 +185,7 @@ public class AgentResultServiceImpl implements AgentResultService {
         revision.setReasons(json(request.reasons()));
         revision.setSuggestedNextActions(json(request.suggestedNextActions()));
         revision.setWarningSigns(json(request.warningSigns()));
+        revision.setSourceReferences(json(request.references()));
         revision.setGeneratedBy(request.generatedBy().name());
         revision.setGeneratorReference(request.workflowVersion());
         revision.setSafetyNotice(request.safetyNotice());
@@ -202,6 +203,7 @@ public class AgentResultServiceImpl implements AgentResultService {
         result.setReasons(revision.getReasons());
         result.setSuggestedNextActions(revision.getSuggestedNextActions());
         result.setWarningSigns(revision.getWarningSigns());
+        result.setSourceReferences(revision.getSourceReferences());
         result.setGeneratedBy(revision.getGeneratedBy());
         result.setGeneratorReference(revision.getGeneratorReference());
         result.setSafetyNotice(revision.getSafetyNotice());
@@ -223,7 +225,9 @@ public class AgentResultServiceImpl implements AgentResultService {
                 && Objects.equals(existing.getFinalizedAt().toInstant(), request.finalizedAt().truncatedTo(ChronoUnit.MICROS))
                 && sameJson(existing.getReasons(), request.reasons())
                 && sameJson(existing.getSuggestedNextActions(), request.suggestedNextActions())
-                && sameJson(existing.getWarningSigns(), request.warningSigns());
+                && sameJson(existing.getWarningSigns(), request.warningSigns())
+                && ((existing.getSourceReferences() == null && request.references().isEmpty())
+                        || sameJson(existing.getSourceReferences(), request.references()));
     }
 
     private boolean sameJson(PGobject existing, Object expected) {

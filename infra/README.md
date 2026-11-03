@@ -11,6 +11,7 @@ All local dependencies live in **one Docker Compose project** named `symptom-ass
 | `nacos` | server `localhost:8848`; console `http://localhost:18080` | `nacos:8848` | Local Config/Naming server |
 | `sentinel-dashboard` | `http://localhost:8858` | `sentinel-dashboard:8080` | Local learning dashboard |
 | `api-docs` | `http://localhost:18081` | `api-docs:8080` | Swagger UI for the canonical OpenAPI contract |
+| `jaeger` (optional `observability` profile) | UI `http://localhost:16686`; OTLP HTTP `localhost:4318` | `jaeger:4318` | Agent execution traces; transient memory storage |
 
 Redis, Seata, Outbox, and Inbox are intentionally absent.
 
@@ -44,6 +45,19 @@ docker compose down
 ```
 
 Run every command above from `infra/`; Compose then discovers the same `.env`, file, project name, network, and volumes automatically.
+
+## Optional Agent trace UI
+
+Jaeger uses the same Compose group and is not started by the default commands. Start only its optional container when inspecting Agent executions:
+
+```powershell
+docker compose --profile observability up -d jaeger
+docker compose --profile observability logs --tail=100 jaeger
+# Open http://localhost:16686 after the collector and query service have started.
+docker compose --profile observability stop jaeger
+```
+
+The pinned Jaeger v2 image runs collector and query in one process with in-memory storage. Its restart loses traces; AI's PostgreSQL Session/Step/Checkpoint/ModelCall records remain the durable business state. There is no new Redis, ClickHouse or database container, and no business migration is triggered. See [Agent observability setup and reading order](../docs/agent-observability.md) to enable OTLP export in the Java process. Compose `.env` values do not automatically become environment variables of host-side Java applications.
 
 ## First login and local credentials
 
@@ -95,7 +109,7 @@ docker compose exec -T business-postgres psql -U symptom_app -d postgres -c "SEL
 docker compose exec -T ai-postgres psql -U symptom_ai -d ai_db -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
 ```
 
-Agent services are implemented, but AI V001, the new daily-usage V002 and History V003 remain **NOT APPLIED**. No init or compose hook executes them. Review the data model before deliberately enabling the Agent runtime; the historical future path remains mounted read-only.
+Agent services are implemented, but AI V001, the daily-usage V002 and History V003/V004 remain **NOT APPLIED**. No init or compose hook executes them. Review the data model before deliberately enabling the Agent runtime; the historical future path remains mounted read-only. Updated History code expects V004 source-reference columns.
 
 After that review, apply each new schema once (these commands have not been run by the agent):
 
@@ -104,6 +118,7 @@ docker compose exec -T ai-postgres psql -U symptom_ai -d ai_db -v ON_ERROR_STOP=
 
 docker compose exec -T ai-postgres psql -U symptom_ai -d ai_db -v ON_ERROR_STOP=1 -f /workspace/future-ai-schema/V002__FUTURE_NOT_APPLIED_user_daily_usage.sql
 docker compose exec -T business-postgres psql -U symptom_app -d history_db -v ON_ERROR_STOP=1 -f /workspace/database/history_db/V003__assessment_result_revision.sql
+docker compose exec -T business-postgres psql -U symptom_app -d history_db -v ON_ERROR_STOP=1 -f /workspace/database/history_db/V004__assessment_result_references.sql
 ```
 
 Use your configured database usernames if they differ. Publish the updated ai-service and Gateway Nacos samples separately; saving repository YAML does not change live Nacos configuration. Set model/search secrets in the Java service environment. See [Agent Service reading guide](../docs/agent-service-reading.md).
@@ -119,7 +134,7 @@ Invoke-RestMethod http://localhost:8848/nacos/v3/admin/core/state/readiness
 Invoke-WebRequest http://localhost:8858 -UseBasicParsing
 ```
 
-The service list must contain exactly these seven entries: `business-postgres`, `ai-postgres`, `minio`, `rabbitmq`, `nacos`, `sentinel-dashboard`, and `api-docs`. For a startup failure, inspect only the relevant service without splitting it into another Compose project:
+Without a profile, the service list contains seven entries: `business-postgres`, `ai-postgres`, `minio`, `rabbitmq`, `nacos`, `sentinel-dashboard`, and `api-docs`. `docker compose --profile observability config --services` additionally lists `jaeger`. For a startup failure, inspect only the relevant service without splitting it into another Compose project:
 
 ```powershell
 docker compose logs --tail=300 nacos

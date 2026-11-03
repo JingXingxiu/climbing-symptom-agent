@@ -187,6 +187,64 @@ class AgentResultServiceTest {
         verify(assessmentMapper, never()).updateById(any(Assessment.class));
     }
 
+    @Test
+    void freezesReferencesInRevisionAndCurrentResult() {
+        String fingerprint = service.getAgentInput(userId, assessmentId).assessmentInputFingerprint();
+        ResultReference reference = new ResultReference("手部结构参考", null, "PIP 位置说明",
+                "KNOWLEDGE", UUID.randomUUID(), UUID.randomUUID(), "reviewed-2026-11");
+        FinalizeAgentResultRequest request = withReferences(request(1, fingerprint), List.of(reference));
+        service.finalizeResult(userId, assessmentId, request);
+        ArgumentCaptor<AssessmentResultRevision> revision = ArgumentCaptor.forClass(AssessmentResultRevision.class);
+        ArgumentCaptor<org.javaup.history.entity.AssessmentResult> current =
+                ArgumentCaptor.forClass(org.javaup.history.entity.AssessmentResult.class);
+        verify(revisionMapper).insert(revision.capture());
+        verify(resultMapper).insert(current.capture());
+        assertEquals(objectMapper.valueToTree(List.of(reference)),
+                objectMapper.readTree(revision.getValue().getSourceReferences().getValue()));
+        assertEquals(revision.getValue().getSourceReferences(), current.getValue().getSourceReferences());
+        assertFalse(current.getValue().getSourceReferences().getValue().contains("provenanceValid"));
+        AssessmentResultResponse response = AssessmentResultResponse.fromEntity(current.getValue(), objectMapper);
+        assertEquals(List.of(reference), response.references());
+    }
+
+    @Test
+    void sameSessionCannotReplayDifferentSources() {
+        String fingerprint = service.getAgentInput(userId, assessmentId).assessmentInputFingerprint();
+        var original = withReferences(request(1, fingerprint), List.of(new ResultReference(
+                "公开参考", "https://example.org/hand", "节选", "WEB_SEARCH", null, null, null)));
+        service.finalizeResult(userId, assessmentId, original);
+        ArgumentCaptor<AssessmentResultRevision> captor = ArgumentCaptor.forClass(AssessmentResultRevision.class);
+        verify(revisionMapper).insert(captor.capture());
+        when(revisionMapper.findBySession(original.sessionId())).thenReturn(captor.getValue());
+        assertEquals(captor.getValue().getId(), service.finalizeResult(userId, assessmentId, original).resultId());
+        assertEquals("AGENT_RESULT_IDEMPOTENCY_CONFLICT", assertThrows(ApiException.class,
+                () -> service.finalizeResult(userId, assessmentId, withReferences(original, List.of()))).code());
+    }
+
+    @Test
+    void rejectsKnowledgeSourceWithoutStableIdsAndOversizedSources() {
+        String fingerprint = service.getAgentInput(userId, assessmentId).assessmentInputFingerprint();
+        ResultReference invalid = new ResultReference("缺失来源", null, "节选", "KNOWLEDGE", null, null, null);
+        assertEquals("INVALID_AGENT_RESULT", assertThrows(ApiException.class,
+                () -> service.finalizeResult(userId, assessmentId,
+                        withReferences(request(1, fingerprint), List.of(invalid)))).code());
+        ResultReference valid = new ResultReference("公开资料", "https://example.org/hand", "节选",
+                "WEB_SEARCH", null, null, null);
+        assertEquals("INVALID_AGENT_RESULT", assertThrows(ApiException.class,
+                () -> service.finalizeResult(userId, assessmentId,
+                        withReferences(request(1, fingerprint), java.util.Collections.nCopies(21, valid)))).code());
+    }
+
+    private FinalizeAgentResultRequest withReferences(
+            FinalizeAgentResultRequest original, List<ResultReference> references
+    ) {
+        return new FinalizeAgentResultRequest(original.sessionId(), original.stepId(), original.checkpointId(),
+                original.attemptNo(), original.recommendationLevel(), original.summary(), original.reasons(),
+                original.suggestedNextActions(), original.warningSigns(), original.safetyNotice(),
+                original.finalizedAt(), original.workflowVersion(), original.generatedBy(),
+                original.assessmentInputFingerprint(), references);
+    }
+
     private FinalizeAgentResultRequest request(int attempt, String fingerprint) {
         return new FinalizeAgentResultRequest(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), attempt,
                 RecommendationLevel.ROUTINE_PROFESSIONAL, "演示结果，仅供测试", List.of("演示原因"),

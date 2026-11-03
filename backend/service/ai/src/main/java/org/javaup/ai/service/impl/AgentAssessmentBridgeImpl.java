@@ -163,7 +163,10 @@ public class AgentAssessmentBridgeImpl implements AgentAssessmentBridge {
                         outcome.finalizedAt(),
                         workflowVersion,
                         generatedBy,
-                        assessmentInputFingerprint);
+                        assessmentInputFingerprint,
+                        outcome.references().stream().map(reference -> new AgentHistoryClient.Reference(
+                                reference.title(), reference.url(), reference.excerpt(), reference.sourceType(),
+                                reference.documentId(), reference.chunkId(), reference.contentVersion())).toList());
 
         try {
             AgentHistoryClient.FinalizedResponse result =

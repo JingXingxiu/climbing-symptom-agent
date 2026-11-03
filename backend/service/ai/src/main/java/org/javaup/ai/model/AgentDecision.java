@@ -1,6 +1,7 @@
 package org.javaup.ai.model;
 
 import java.util.List;
+import java.util.UUID;
 
 import org.javaup.ai.api.dto.AgentEnums.AgentBehavior;
 import org.javaup.ai.api.dto.AgentEnums.RecommendationLevel;
@@ -30,6 +31,26 @@ public record AgentDecision(
     public record Reference(
             String title,
             String url,
-            String excerpt
-    ) {}
+            String excerpt,
+            String sourceType,
+            UUID documentId,
+            UUID chunkId,
+            String contentVersion
+    ) {
+        /** 保留联网资料的简洁构造；知识库来源另带稳定的文档和片段 ID。 */
+        public Reference(String title, String url, String excerpt) {
+            this(title, url, excerpt, "WEB_SEARCH", null, null, null);
+        }
+
+        public Reference(
+                String title,
+                String url,
+                String excerpt,
+                String sourceType,
+                UUID documentId,
+                UUID chunkId
+        ) {
+            this(title, url, excerpt, sourceType, documentId, chunkId, null);
+        }
+    }
 }

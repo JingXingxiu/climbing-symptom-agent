@@ -84,7 +84,7 @@ History 的 `AgentResultServiceImpl` 可以接着按 `getAgentInput → finalize
 
 - Nacos 的 `ai-service-dev.yaml` 已提供 AI 数据源、模型 profile 与搜索配置；默认选择智谱 `zhipu/glm-4.6v-flash`。本机密钥由模块外部文件 `ai-service.local.properties` 导入，不提交 Git，也不打入 JAR，配置方式见 AI 模块 README。
 - `FakeAgentModel` 已移到 `src/test/java`，仅用于离线测试，不再是正式模型选项，也不作为失败兜底；真实运行缺少配置或调用失败会明确报错。
-- 真正启用持久化前，需要人工审查并执行 `database/future/ai_db/V001__FUTURE_NOT_APPLIED_ai_schema.sql` 与 History V003；这轮没有自动迁移或启动 Docker。AI SQL 暂时保留原 future 路径，不代表启动会替你建表。
+- 真正启用持久化前，需要人工审查并执行 AI V001/V002 与 History V003/V004；V004 保存结果来源快照。没有自动迁移或启动 Docker。AI SQL 暂时保留原 future 路径，不代表启动会替你建表。
 - 真实模型需要配置允许的 provider/model、地址与密钥；搜索需要自己的配置。真实模型、搜索服务和远程图片读取尚未实测，这份参考实现不能据此宣称已经完成线上联调。
 - `localhost` 的 MinIO 地址只对本机可达；当前实现由AI服务在允许的主机上下载图片，再作为图片字节提交给远程模型，云模型不直接访问localhost。密钥只放后端配置，不写入源码、数据库快照或前端。
-- 当前未实现 RAG、MCP、RabbitMQ、Outbox/Inbox。先把这一条有界分析链理解并复现。
+- 可选 RAG 只读检索已实现，默认关闭且没有真实资料；见 [RAG 阅读说明](rag.md)。Agent 阶段观测、Trace 和指标见 [观测说明](agent-observability.md)。MCP、RabbitMQ、Outbox/Inbox 不属于当前 Agent 实现。

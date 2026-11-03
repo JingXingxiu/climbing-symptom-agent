@@ -31,12 +31,14 @@ The application is responsible for updating `updated_at` and optimistic `version
 - meaningful task steps (not every internal tool/function call);
 - resumable JSONB checkpoints with stable query fields kept on the session;
 - privacy-conscious model call metadata without default full Prompt/Response retention;
-- a minimal optional document/chunk foundation for later RAG.
+- optional document/chunk storage used by the read-only RAG implementation.
 
-The schema includes explicit pause/resume, parent-linked branches, immutable input/checkpoint snapshots, a single active-checkpoint pointer, execution generations for stale replies, and whole-session budgets. Read [the learning guide](../docs/agent-database-learning.md) and [Service reading guide](../docs/agent-service-reading.md) before enabling persistence. RAG remains FUTURE / OPTIONAL.
+The schema includes explicit pause/resume, parent-linked branches, immutable input/checkpoint snapshots, a single active-checkpoint pointer, execution generations for stale replies, and whole-session budgets. Read [the learning guide](../docs/agent-database-learning.md) and [Service reading guide](../docs/agent-service-reading.md) before enabling persistence. RAG is optional and disabled by default; its code is implemented, while these tables remain NOT APPLIED. No reference corpus is included.
 
 `future/ai_db/V002__FUTURE_NOT_APPLIED_user_daily_usage.sql` is also **FUTURE / NOT APPLIED**. It adds only `ai_user_daily_usage`, keyed by `(user_id, usage_date)`. The AI service atomically reserves a daily execution attempt in the same transaction as Session/ModelCall reservation. Dates use Asia/Shanghai; failures after a committed reservation still consume quota. Payment supplies the current limit through API; purchasing a plan never resets this table. Apply V001 then V002 explicitly after review; neither is part of Docker bootstrap.
 
 `history_db/V003__assessment_result_revision.sql` is also **NOT APPLIED**. It adds result history while leaving the current `assessment_result` table and existing API reads unchanged. It is not included in the existing V001/V002 setup commands; review and apply it explicitly when enabling Agent finalization. The new History service writes both tables in one local transaction, checks stable input fingerprints and rejects late results from older attempts.
 
-The future `embedding` column intentionally uses unconstrained `vector` and has no ANN index. It may remain empty when applying the schema. Select an embedding model and dimension before using it; consider dimension-specific indexing only when retrieval is implemented. The current Agent flow does not depend on RAG.
+`history_db/V004__assessment_result_references.sql` is **NOT APPLIED**. Review and apply it after V003 before using the updated History service. It adds bounded JSONB source snapshots to the current and revision result tables, preserving references from AI finalization without cross-database foreign keys. Existing records receive empty arrays. The new application expects these columns; deploy this migration with the updated code.
+
+The `embedding` column intentionally uses unconstrained `vector` and has no ANN index. It may remain empty after the schema is applied. The implemented exact retrieval matches `provider:model` and dimensions in a materialized CTE before evaluating cosine distance. An empty corpus returns EMPTY without calling the embedding provider; an unapplied schema is UNAVAILABLE. See [RAG configuration](../docs/rag.md). The Agent flow remains usable with RAG disabled.

@@ -1,5 +1,6 @@
 package org.javaup.history.api.dto;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -23,5 +24,23 @@ public record FinalizeAgentResultRequest(
         @NotNull Instant finalizedAt,
         @NotBlank @Size(max = 120) String workflowVersion,
         @NotNull HistoryEnums.ResultGeneratedBy generatedBy,
-        @NotBlank @Pattern(regexp = "^[0-9a-f]{64}$") String assessmentInputFingerprint
-) {}
+        @NotBlank @Pattern(regexp = "^[0-9a-f]{64}$") String assessmentInputFingerprint,
+        @Size(max = 20) List<@NotNull @Valid ResultReference> references
+) {
+    public FinalizeAgentResultRequest {
+        references = references == null ? List.of() : references;
+    }
+
+    /** 兼容没有来源的已有调用；缺失来源明确按空数组处理。 */
+    public FinalizeAgentResultRequest(
+            UUID sessionId, UUID stepId, UUID checkpointId, int attemptNo,
+            HistoryEnums.RecommendationLevel recommendationLevel, String summary,
+            List<String> reasons, List<String> suggestedNextActions, List<String> warningSigns,
+            String safetyNotice, Instant finalizedAt, String workflowVersion,
+            HistoryEnums.ResultGeneratedBy generatedBy, String assessmentInputFingerprint
+    ) {
+        this(sessionId, stepId, checkpointId, attemptNo, recommendationLevel, summary,
+                reasons, suggestedNextActions, warningSigns, safetyNotice, finalizedAt,
+                workflowVersion, generatedBy, assessmentInputFingerprint, List.of());
+    }
+}

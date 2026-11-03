@@ -5,6 +5,7 @@ import type {
   Assessment,
   AssessmentInput,
   AssessmentResult,
+  KnowledgeReference,
   PictureAnnotation,
   SymptomLocation,
   VisualSource,
@@ -161,6 +162,7 @@ interface AssessmentResultResponse {
   safetyNotice: string
   generatedBy: 'MOCK' | 'RULE' | 'AI'
   finalizedAt: string
+  references?: KnowledgeReference[]
 }
 
 interface PictureUploadMetadata {
@@ -305,6 +307,7 @@ interface AgentOutcomeResponse {
   safetyNotice: string
   finalizedAt: string
   uncertaintyNote?: string | null
+  references?: KnowledgeReference[]
 }
 
 const EMPTY_INPUT: AssessmentInput = {
@@ -552,6 +555,7 @@ export class HttpAssessmentApi implements AssessmentApi {
       safetyNotice: result.safetyNotice,
       generatedBy: result.generatedBy,
       finalizedAt: result.finalizedAt,
+      references: result.references ?? [],
     }
   }
 

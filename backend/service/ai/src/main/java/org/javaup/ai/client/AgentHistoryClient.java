@@ -55,7 +55,30 @@ public interface AgentHistoryClient {
             Instant finalizedAt,
             String workflowVersion,
             String generatedBy,
-            String assessmentInputFingerprint
+            String assessmentInputFingerprint,
+            List<Reference> references
+    ) {
+        public FinalizeRequest(
+                UUID sessionId, UUID stepId, UUID checkpointId, int attemptNo,
+                String recommendationLevel, String summary, List<String> reasons,
+                List<String> suggestedNextActions, List<String> warningSigns,
+                String safetyNotice, Instant finalizedAt, String workflowVersion,
+                String generatedBy, String assessmentInputFingerprint
+        ) {
+            this(sessionId, stepId, checkpointId, attemptNo, recommendationLevel, summary,
+                    reasons, suggestedNextActions, warningSigns, safetyNotice, finalizedAt,
+                    workflowVersion, generatedBy, assessmentInputFingerprint, List.of());
+        }
+    }
+
+    record Reference(
+            String title,
+            String url,
+            String excerpt,
+            String sourceType,
+            UUID documentId,
+            UUID chunkId,
+            String contentVersion
     ) {
     }
 

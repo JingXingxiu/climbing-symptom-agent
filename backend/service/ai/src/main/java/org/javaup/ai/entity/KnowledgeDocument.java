@@ -13,7 +13,7 @@ import org.postgresql.util.PGobject;
 import java.time.OffsetDateTime;
 import java.util.UUID;
 
-/** FUTURE：可选知识文档入口，当前 Agent 工作流不依赖 RAG。 */
+/** 可选知识文档；只读检索默认关闭，资料与 SQL 需显式准备，不影响 Agent 状态推进。 */
 @Getter
 @Setter
 @TableName("knowledge_document")

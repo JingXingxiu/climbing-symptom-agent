@@ -82,6 +82,16 @@ export interface AssessmentInput {
   additionalDescription: string
 }
 
+export interface KnowledgeReference {
+  title: string
+  url?: string | null
+  excerpt?: string | null
+  sourceType?: 'WEB_SEARCH' | 'KNOWLEDGE'
+  documentId?: string | null
+  chunkId?: string | null
+  contentVersion?: string | null
+}
+
 export interface AssessmentResult {
   assessmentId: string
   summary: string
@@ -92,6 +102,7 @@ export interface AssessmentResult {
   safetyNotice: string
   generatedBy: 'MOCK' | 'RULE' | 'AI'
   finalizedAt: string
+  references?: KnowledgeReference[]
 }
 
 export interface Assessment {

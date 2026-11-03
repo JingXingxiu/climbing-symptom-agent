@@ -63,6 +63,10 @@ public class AssessmentResultRevision {
     @TableField("warning_signs")
     private PGobject warningSigns;
 
+    /** 随本次定稿冻结的来源，保留文档/片段及内容版本；不做跨服务外键。 */
+    @TableField("source_references")
+    private PGobject sourceReferences;
+
     /** 结果来源：MOCK、RULE 或 AI。 */
     private String generatedBy;
 

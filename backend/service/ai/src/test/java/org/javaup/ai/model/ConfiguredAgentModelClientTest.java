@@ -3,7 +3,10 @@ package org.javaup.ai.model;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.javaup.ai.api.problem.ApiException;
+import org.javaup.ai.observability.AgentTelemetry;
 import org.javaup.ai.search.SearchProperties;
 import org.javaup.ai.search.SearchTool;
 import org.junit.jupiter.api.Test;
@@ -111,12 +114,14 @@ class ConfiguredAgentModelClientTest {
                                         UUID.randomUUID(),
                                         URI.create("http://unconfigured.invalid/image"),
                                         "image/png")));
+        ObservationRegistry registry = ObservationRegistry.create();
+        SpringAICompatibleModel compatible = new SpringAICompatibleModel(
+                properties, mapper, search,
+                new AgentTelemetry(registry, new SimpleMeterRegistry()), registry);
         ApiException failure =
                 assertThrows(
                         ApiException.class,
-                        () ->
-                                new SpringAICompatibleModel(properties, mapper, search)
-                                        .analyze(request, profile));
+                        () -> compatible.analyze(request, profile));
         assertEquals("MODEL_IMAGE_HOST_NOT_ALLOWED", failure.code());
     }
 

@@ -4,9 +4,10 @@ import static org.javaup.ai.api.problem.AIErrorCode.*;
 
 import java.net.URI;
 import java.util.List;
-import java.util.UUID;
 
 import jakarta.validation.ConstraintViolationException;
+
+import org.javaup.ai.observability.AgentTraceContext;
 
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -160,7 +161,7 @@ public final class ApiProblemAdvice {
 
         problem.setType(URI.create("/problems/" + code.toLowerCase()));
         problem.setProperty("code", code);
-        problem.setProperty("traceId", UUID.randomUUID().toString());
+        problem.setProperty("traceId", AgentTraceContext.currentOrNew());
 
         if (!fieldErrors.isEmpty()) {
             problem.setProperty("fieldErrors", fieldErrors);

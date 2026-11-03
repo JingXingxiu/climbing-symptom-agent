@@ -49,6 +49,7 @@ import org.javaup.ai.model.AgentDecision;
 import org.javaup.ai.model.AgentModelClient;
 import org.javaup.ai.model.AgentModelRequest;
 import org.javaup.ai.model.AgentModelResult;
+import org.javaup.ai.observability.AgentTelemetry;
 import org.javaup.ai.service.AgentAssessmentBridge;
 import org.javaup.ai.service.AgentJson;
 import org.javaup.ai.service.AgentQuotaService;
@@ -82,6 +83,7 @@ public class AgentServiceImpl implements AgentService {
     private final AgentWorkflowProperties settings;
     private final AgentJson json;
     private final Clock clock;
+    private final AgentTelemetry telemetry;
 
     public AgentServiceImpl(
             AgentSessionMapper sessions,
@@ -94,7 +96,8 @@ public class AgentServiceImpl implements AgentService {
             AgentQuotaService quota,
             AgentWorkflowProperties settings,
             AgentJson json,
-            Clock clock
+            Clock clock,
+            AgentTelemetry telemetry
     ) {
         this.sessions = sessions;
         this.steps = steps;
@@ -107,6 +110,7 @@ public class AgentServiceImpl implements AgentService {
         this.settings = settings;
         this.json = json;
         this.clock = clock;
+        this.telemetry = telemetry;
     }
 
     @Override
@@ -380,16 +384,26 @@ public class AgentServiceImpl implements AgentService {
             UUID sessionId,
             AgentVersionRequest request
     ) {
+        return telemetry.inSession(sessionId, () -> advance(userId, sessionId, request));
+    }
+
+    private AgentSessionResponse advance(
+            UUID userId,
+            UUID sessionId,
+            AgentVersionRequest request
+    ) {
         Long expected = version(request);
-        EntitlementResponse entitlement = quota.getEntitlement(userId);
-        Execution execution = transaction.execute(
-                tx -> reserveExecution(userId, sessionId, expected, entitlement));
+        EntitlementResponse entitlement = telemetry.observe(
+                "entitlement", () -> quota.getEntitlement(userId));
+        Execution execution = telemetry.observe(
+                "reserve", () -> transaction.execute(
+                        tx -> reserveExecution(userId, sessionId, expected, entitlement)));
         long started = System.nanoTime();
         AgentModelResult result;
 
         try {
             List<AgentModelRequest.Picture> pictures =
-                    bridge.resolvePictures(userId, execution.input());
+                    telemetry.observe("image_resolve", () -> bridge.resolvePictures(userId, execution.input()));
             ObjectNode modelState = execution.state().deepCopy();
             modelState.put(
                     "remainingModelCalls",
@@ -410,6 +424,7 @@ public class AgentServiceImpl implements AgentService {
         } catch (RuntimeException failure) {
             transaction.executeWithoutResult(
                     tx -> recordFailure(userId, execution, elapsed(started), failure));
+            telemetry.recordModelOutcome(execution.call().getStatus());
 
             if (failure instanceof ApiException api) {
                 throw api;
@@ -423,8 +438,16 @@ public class AgentServiceImpl implements AgentService {
 
         AgentModelResult completed = result;
 
-        return transaction.execute(
-                tx -> completeExecution(userId, execution, completed, elapsed(started)));
+        AgentSessionResponse response = telemetry.observe(
+                "commit", () -> transaction.execute(
+                        tx -> completeExecution(userId, execution, completed, elapsed(started))));
+        telemetry.recordModelOutcome(execution.call().getStatus());
+
+        if (ModelCallStatus.SUCCEEDED.name().equals(execution.call().getStatus())) {
+            telemetry.recordDecision(completed.decision().behavior().name());
+        }
+
+        return response;
     }
 
     @Override
@@ -686,6 +709,7 @@ public class AgentServiceImpl implements AgentService {
                 responseMetadata,
                 startedAt,
                 createdAt);
+        call.setTraceId(telemetry.currentTraceId());
         calls.insert(call);
 
         List<AgentModelRequest.Turn> history = new ArrayList<>();
@@ -763,7 +787,8 @@ public class AgentServiceImpl implements AgentService {
                     session,
                     decision.outcome(),
                     SAFETY_NOTICE,
-                    now().toInstant());
+                    now().toInstant(),
+                    decision.references());
             next.set("outcome", json.node(output));
             next.remove("pendingQuestion");
             step.complete(now());

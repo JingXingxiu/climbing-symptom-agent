@@ -17,6 +17,9 @@ import org.javaup.ai.config.PaymentEntitlementBreakerProperties;
 import org.javaup.ai.entity.*;
 import org.javaup.ai.mapper.*;
 import org.javaup.ai.model.*;
+import org.javaup.ai.observability.AgentTelemetry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.observation.ObservationRegistry;
 import org.javaup.ai.service.AgentAssessmentBridge;
 import org.javaup.ai.service.AgentJson;
 import org.javaup.ai.service.AgentQuotaService;
@@ -58,6 +61,8 @@ class AgentServiceImplTest {
     private final UUID assessmentId = UUID.randomUUID();
     private final JsonMapper mapper = JsonMapper.builder().findAndAddModules().build();
     private final AgentJson json = new AgentJson(mapper);
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+    private final AgentTelemetry telemetry = new AgentTelemetry(ObservationRegistry.create(), metrics);
     private final AgentSessionMapper sessions = mock(AgentSessionMapper.class);
     private final AgentStepMapper steps = mock(AgentStepMapper.class);
     private final AgentCheckpointMapper checkpoints = mock(AgentCheckpointMapper.class);
@@ -106,7 +111,8 @@ class AgentServiceImplTest {
                                 Clock.fixed(TIME, ZoneOffset.UTC)),
                         settings,
                         json,
-                        Clock.fixed(TIME, ZoneOffset.UTC));
+                        Clock.fixed(TIME, ZoneOffset.UTC),
+                        telemetry);
         when(payment.getEntitlement(userId)).thenAnswer(invocation -> {
             assertFalse(inTransaction, "Payment must be queried outside the execution transaction");
             return new EntitlementResponse(userId, "FREE", "免费", 10, null);
@@ -376,6 +382,16 @@ class AgentServiceImplTest {
         AgentSessionResponse read = service.getAgentSession(userId, created.sessionId());
         assertEquals(created.version(), read.version());
         verifyNoInteractions(model, bridge, payment, usage);
+    }
+
+    @Test
+    void executionPersistsTraceIdForLaterObservationLookup() {
+        advance(create());
+
+        ModelCall call = callRows.values().iterator().next();
+        assertNotNull(call.getTraceId());
+        assertTrue(call.getTraceId().matches("[0-9a-f]{32}"));
+        assertEquals("SUCCEEDED", call.getStatus());
     }
 
     @Test

@@ -1041,6 +1041,29 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/ai/v1/agent-sessions/{sessionId}/observations:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [AI / Agent]
+      operationId: getAgentObservations
+      x-service-owner: ai-service
+      summary: 读取当前用户任务的脱敏执行记录
+      description: |
+        返回所有分支的步骤元数据及模型调用统计，以 activeBranch 标识当前分支。
+        traceId 可用于本机 Jaeger 查询；不返回症状、回答、Prompt、图片 URL 或模型原文。
+        executionLatencyMs 为本轮总耗时，纯模型和检索耗时通过独立 Span 查看。
+        步骤和调用数量受 Session 的 maxSteps/maxModelCalls 预算限制。
+      responses:
+        '200':
+          description: 任务执行记录，新任务的数组为空
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentObservationResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/ai/v1/agent-sessions/{sessionId}/outcome:
     parameters:
       - $ref: '#/components/parameters/SessionId'
@@ -1992,6 +2015,10 @@ components:
           description: 必须明确“不是医学诊断”；紧急信号应提示及时寻求专业帮助。
         generatedBy: { $ref: '#/components/schemas/ResultGeneratedBy' }
         finalizedAt: { type: string, format: date-time }
+        references:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/SourceReference' }
 
     ResolveAgentPicturesRequest:
       type: object
@@ -2069,6 +2096,10 @@ components:
         workflowVersion: { type: string, minLength: 1, maxLength: 120 }
         generatedBy: { type: string, enum: [MOCK, AI] }
         assessmentInputFingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        references:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/SourceReference' }
 
     FinalizedAgentResultResponse:
       type: object
@@ -2187,6 +2218,74 @@ components:
         maxModelCalls: { type: integer, minimum: 1 }
         maxSteps: { type: integer, minimum: 1 }
 
+    AgentObservationResponse:
+      type: object
+      required: [sessionId, status, activeCheckpointId, steps, modelCalls]
+      properties:
+        sessionId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/AgentSessionStatus' }
+        activeCheckpointId: { type: [string, 'null'], format: uuid }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [stepId, stepNumber, stepType, status, activeBranch, startedAt]
+            properties:
+              stepId: { type: string, format: uuid }
+              parentStepId: { type: [string, 'null'], format: uuid }
+              stepNumber: { type: integer, minimum: 1 }
+              stepType: { type: string }
+              status: { type: string }
+              activeBranch: { type: boolean }
+              startedAt: { type: string, format: date-time }
+              completedAt: { type: [string, 'null'], format: date-time }
+        modelCalls:
+          type: array
+          items:
+            type: object
+            required: [callId, callNumber, executionGeneration, provider, model, status, startedAt]
+            properties:
+              callId: { type: string, format: uuid }
+              stepId: { type: [string, 'null'], format: uuid }
+              baseCheckpointId: { type: string, format: uuid }
+              callNumber: { type: integer, minimum: 1 }
+              executionGeneration: { type: integer, format: int64, minimum: 0 }
+              provider: { type: string }
+              model: { type: string }
+              status: { type: string, enum: [STARTED, SUCCEEDED, FAILED, DISCARDED] }
+              traceId: { type: [string, 'null'], description: 旧记录可为空，新执行为32位十六进制Trace ID }
+              executionLatencyMs: { type: [integer, 'null'], minimum: 0 }
+              inputTokens: { type: [integer, 'null'], minimum: 0 }
+              outputTokens: { type: [integer, 'null'], minimum: 0 }
+              totalTokens: { type: [integer, 'null'], minimum: 0 }
+              errorCategory: { type: [string, 'null'] }
+              errorCode: { type: [string, 'null'] }
+              startedAt: { type: string, format: date-time }
+              completedAt: { type: [string, 'null'], format: date-time }
+
+    SourceReference:
+      type: object
+      description: 本轮真实检索资料；不声称每条都已被模型实际引用。知识来源通过 documentId/chunkId 追溯。
+      required: [title, sourceType]
+      oneOf:
+        - required: [url]
+          properties:
+            sourceType: { const: WEB_SEARCH }
+            url: { type: string, format: uri, pattern: '^https?://' }
+        - required: [documentId, chunkId]
+          properties:
+            sourceType: { const: KNOWLEDGE }
+            documentId: { type: string, format: uuid }
+            chunkId: { type: string, format: uuid }
+      properties:
+        title: { type: string, maxLength: 300 }
+        url: { type: [string, 'null'], format: uri, description: 仅HTTP(S)外部来源可用，无链接的知识资料为空 }
+        excerpt: { type: [string, 'null'], maxLength: 2500 }
+        sourceType: { type: string, enum: [WEB_SEARCH, KNOWLEDGE] }
+        documentId: { type: [string, 'null'], format: uuid }
+        chunkId: { type: [string, 'null'], format: uuid }
+        contentVersion: { type: [string, 'null'], maxLength: 120 }
+
     AgentStepSummary:
       type: object
       required: [stepNumber, stepType, message, createdAt, stepId, parentStepId, status]
@@ -2238,6 +2337,10 @@ components:
         safetyNotice: { type: string }
         finalizedAt: { type: string, format: date-time }
         uncertaintyNote: { type: [string, 'null'] }
+        references:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/SourceReference' }
 
     Problem:
       type: object

@@ -27,8 +27,22 @@ public record AssessmentResultResponse(
         @NotNull @Size(max = 20) List<@Size(max = 500) String> warningSigns,
         @NotBlank String safetyNotice,
         @NotNull ResultGeneratedBy generatedBy,
-        @NotNull Instant finalizedAt
+        @NotNull Instant finalizedAt,
+        @NotNull List<ResultReference> references
 ) {
+    public AssessmentResultResponse {
+        references = references == null ? List.of() : List.copyOf(references);
+    }
+
+    public AssessmentResultResponse(
+            UUID assessmentId, RecommendationLevel recommendationLevel, String summary,
+            List<String> reasons, List<String> suggestedNextActions, List<String> warningSigns,
+            String safetyNotice, ResultGeneratedBy generatedBy, Instant finalizedAt
+    ) {
+        this(assessmentId, recommendationLevel, summary, reasons, suggestedNextActions,
+                warningSigns, safetyNotice, generatedBy, finalizedAt, List.of());
+    }
+
     public static AssessmentResultResponse fromEntity(
             AssessmentResult entity,
             ObjectMapper objectMapper
@@ -45,8 +59,24 @@ public record AssessmentResultResponse(
                 readTextList(entity.getWarningSigns(), objectMapper),
                 entity.getSafetyNotice(),
                 ResultGeneratedBy.valueOf(entity.getGeneratedBy()),
-                entity.getFinalizedAt().toInstant()
+                entity.getFinalizedAt().toInstant(),
+                readReferences(entity.getSourceReferences(), objectMapper)
         );
+    }
+
+    private static List<ResultReference> readReferences(PGobject value, ObjectMapper mapper) {
+        if (value == null || value.getValue() == null) {
+            return List.of();
+        }
+        JsonNode node = mapper.readTree(value.getValue());
+        if (node == null || !node.isArray()) {
+            throw new IllegalStateException("Stored references must be a JSON array");
+        }
+        List<ResultReference> references = new ArrayList<>();
+        for (JsonNode item : node) {
+            references.add(mapper.treeToValue(item, ResultReference.class));
+        }
+        return List.copyOf(references);
     }
 
     private static List<String> readTextList(PGobject value, ObjectMapper objectMapper) {
