@@ -1,0 +1,257 @@
+:root,
+page {
+  --ink: #1c2524;
+  --muted: #62706d;
+  --primary: #116b5b;
+  --primary-soft: #ddf2ec;
+  --accent: #dc654c;
+  --danger: #bd3b35;
+  --surface: #ffffff;
+  --line: #dce3e1;
+  --shadow: 0 18rpx 48rpx rgba(25, 48, 43, 0.08);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+view,
+text,
+button,
+input,
+textarea,
+image,
+scroll-view,
+canvas {
+  box-sizing: border-box;
+}
+
+button::after {
+  border: none;
+}
+
+.page {
+  min-height: 100vh;
+  padding: 32rpx 28rpx 64rpx;
+  background:
+    radial-gradient(circle at 92% 0%, rgba(90, 185, 157, 0.15), transparent 32%),
+    #f4f6f8;
+}
+
+.hero {
+  padding: 26rpx 8rpx 36rpx;
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 14rpx;
+  color: var(--primary);
+  font-size: 22rpx;
+  font-weight: 700;
+  letter-spacing: 3rpx;
+}
+
+.title {
+  display: block;
+  color: var(--ink);
+  font-size: 50rpx;
+  font-weight: 760;
+  line-height: 1.18;
+}
+
+.subtitle {
+  display: block;
+  margin-top: 18rpx;
+  color: var(--muted);
+  font-size: 28rpx;
+  line-height: 1.65;
+}
+
+.card {
+  margin-bottom: 24rpx;
+  padding: 30rpx;
+  border: 1rpx solid rgba(220, 227, 225, 0.9);
+  border-radius: 28rpx;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.card-title {
+  display: block;
+  color: var(--ink);
+  font-size: 31rpx;
+  font-weight: 700;
+}
+
+.card-subtitle {
+  display: block;
+  margin-top: 8rpx;
+  color: var(--muted);
+  font-size: 24rpx;
+  line-height: 1.55;
+}
+
+.field {
+  margin-top: 30rpx;
+}
+
+.label {
+  display: block;
+  margin-bottom: 14rpx;
+  color: #293432;
+  font-size: 27rpx;
+  font-weight: 650;
+}
+
+.required::after {
+  margin-left: 6rpx;
+  color: var(--danger);
+  content: '*';
+}
+
+.input,
+.textarea,
+.picker-value {
+  width: 100%;
+  border: 1rpx solid var(--line);
+  border-radius: 18rpx;
+  background: #fbfcfc;
+  color: var(--ink);
+  font-size: 28rpx;
+}
+
+.input,
+.picker-value {
+  min-height: 88rpx;
+  padding: 0 24rpx;
+  line-height: 88rpx;
+}
+
+.textarea {
+  min-height: 180rpx;
+  padding: 22rpx 24rpx;
+  line-height: 1.6;
+}
+
+.segmented {
+  display: flex;
+  gap: 12rpx;
+}
+
+.segment {
+  flex: 1;
+  padding: 20rpx 16rpx;
+  border: 1rpx solid var(--line);
+  border-radius: 18rpx;
+  background: #f8faf9;
+  color: var(--muted);
+  font-size: 26rpx;
+  text-align: center;
+}
+
+.segment--active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.primary-button,
+.secondary-button,
+.danger-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 92rpx;
+  border-radius: 46rpx;
+  font-size: 29rpx;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.primary-button {
+  background: var(--primary);
+  color: #fff;
+  box-shadow: 0 14rpx 30rpx rgba(17, 107, 91, 0.22);
+}
+
+.primary-button[disabled] {
+  background: #a6b8b4;
+  box-shadow: none;
+  color: #edf2f1;
+}
+
+.secondary-button {
+  border: 1rpx solid var(--line);
+  background: #fff;
+  color: var(--primary);
+}
+
+.danger-button {
+  background: #fff0ee;
+  color: var(--danger);
+}
+
+.sticky-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  display: flex;
+  gap: 16rpx;
+  margin: 28rpx -4rpx 0;
+  padding: 18rpx 4rpx max(18rpx, env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, rgba(244, 246, 248, 0), #f4f6f8 24%);
+}
+
+.sticky-actions button {
+  flex: 1;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14rpx;
+}
+
+.chip {
+  padding: 15rpx 22rpx;
+  border: 1rpx solid var(--line);
+  border-radius: 999rpx;
+  background: #fafbfb;
+  color: #465451;
+  font-size: 25rpx;
+}
+
+.chip--active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-weight: 650;
+}
+
+.empty {
+  padding: 70rpx 30rpx;
+  color: var(--muted);
+  font-size: 27rpx;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.notice {
+  padding: 22rpx 24rpx;
+  border-radius: 20rpx;
+  background: #fff7e8;
+  color: #805615;
+  font-size: 25rpx;
+  line-height: 1.6;
+}
+
+.skeleton {
+  min-height: 180rpx;
+  border-radius: 20rpx;
+  background: linear-gradient(90deg, #eef1f0 25%, #f8f9f9 37%, #eef1f0 63%);
+  background-size: 400% 100%;
+  animation: loading 1.2s ease infinite;
+}
+
+@keyframes loading {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}

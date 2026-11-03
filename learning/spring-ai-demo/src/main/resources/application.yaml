@@ -1,0 +1,36 @@
+server:
+  address: 127.0.0.1
+  port: ${DEMO_PORT:8099}
+
+spring:
+  application:
+    name: spring-ai-demo
+  config:
+    # 本机密钥放在工程根目录的忽略文件中，不随应用 JAR 打包。
+    import: "optional:file:./application-local.yaml"
+  mvc:
+    problemdetails:
+      enabled: true
+  ai:
+    model:
+      chat: openai
+      embedding: none
+      image: none
+      moderation: none
+      audio:
+        speech: none
+        transcription: none
+    openai:
+      # Spring AI 2.0.2 使用 SDK 追加 /chat/completions；这里填写 API 根地址。
+      base-url: ${DEMO_AI_BASE_URL:https://open.bigmodel.cn/api/paas/v4}
+      # 可由工程根目录的 application-local.yaml 覆盖，也可使用环境变量。
+      api-key: ${DEMO_AI_API_KEY:}
+      timeout: 60s
+      max-retries: 0
+      chat:
+        model: ${DEMO_AI_MODEL:glm-4.7-flash}
+
+logging:
+  level:
+    # 仅增加 MVC 请求处理日志；不启用 SDK 的请求头或请求体调试日志。
+    org.springframework.web.servlet.DispatcherServlet: DEBUG

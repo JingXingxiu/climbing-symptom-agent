@@ -1,0 +1,163 @@
+name: symptom-assessment-dev
+
+services:
+  business-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${BUSINESS_POSTGRES_USER:-symptom_app}
+      POSTGRES_PASSWORD: ${BUSINESS_POSTGRES_PASSWORD:-symptom_dev_only}
+      POSTGRES_DB: postgres
+    ports:
+      - "${BUSINESS_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - business_pg_data:/var/lib/postgresql/data
+      - ./postgres-business/init:/docker-entrypoint-initdb.d:ro
+      - ../database:/workspace/database:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  ai-postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${AI_POSTGRES_USER:-symptom_ai}
+      POSTGRES_PASSWORD: ${AI_POSTGRES_PASSWORD:-symptom_ai_dev_only}
+      POSTGRES_DB: ai_db
+    ports:
+      - "${AI_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - ai_pg_data:/var/lib/postgresql/data
+      - ./postgres-ai/init:/docker-entrypoint-initdb.d:ro
+      - ../database/future/ai_db:/workspace/future-ai-schema:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d ai_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-symptom_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-symptom_minio_dev_only}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-symptom_app}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-symptom_rabbit_dev_only}
+    ports:
+      - "${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  nacos:
+    image: nacos/nacos-server:${NACOS_VERSION:-v3.1.1}
+    restart: unless-stopped
+    environment:
+      MODE: standalone
+      FUNCTION_MODE: microservice
+      PREFER_HOST_MODE: hostname
+      NACOS_AUTH_ENABLE: ${NACOS_AUTH_ENABLE:-false}
+      NACOS_AUTH_ADMIN_ENABLE: "true"
+      NACOS_AUTH_CONSOLE_ENABLE: "true"
+      NACOS_AUTH_SYSTEM_TYPE: nacos
+      NACOS_AUTH_TOKEN: ${NACOS_AUTH_TOKEN:-VGhpc0lzTXlTdWZmaWNpZW50bHlMb25nRGV2U2VjcmV0S2V5MTIzNDU2Nzg5MA==}
+      NACOS_AUTH_IDENTITY_KEY: ${NACOS_AUTH_IDENTITY_KEY:-symptom-dev-identity-key}
+      NACOS_AUTH_IDENTITY_VALUE: ${NACOS_AUTH_IDENTITY_VALUE:-symptom-dev-identity-value}
+      JVM_XMS: ${NACOS_JVM_XMS:-512m}
+      JVM_XMX: ${NACOS_JVM_XMX:-512m}
+      JVM_XMN: ${NACOS_JVM_XMN:-256m}
+    ports:
+      - "127.0.0.1:${NACOS_CONSOLE_PORT:-18080}:8080"
+      - "127.0.0.1:${NACOS_SERVER_PORT:-8848}:8848"
+      - "127.0.0.1:${NACOS_GRPC_PORT:-9848}:9848"
+    volumes:
+      - nacos_data:/home/nacos/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://127.0.0.1:8848/nacos/v3/admin/core/state/readiness | grep -Eq '\"data\"[[:space:]]*:[[:space:]]*\"ok\"'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  sentinel-dashboard:
+    image: symptom-assessment/sentinel-dashboard:${SENTINEL_VERSION:-1.8.9}
+    build:
+      context: ./sentinel-dashboard
+      args:
+        SENTINEL_VERSION: ${SENTINEL_VERSION:-1.8.9}
+    restart: unless-stopped
+    environment:
+      JAVA_TOOL_OPTIONS: >-
+        -Xms128m -Xmx256m
+        -Dserver.port=8080
+        -Dcsp.sentinel.dashboard.server=localhost:8080
+        -Dproject.name=sentinel-dashboard
+        -Dserver.servlet.session.timeout=7200
+      "sentinel.dashboard.auth.username": ${SENTINEL_DASHBOARD_USERNAME:-sentinel}
+      "sentinel.dashboard.auth.password": ${SENTINEL_DASHBOARD_PASSWORD:-sentinel_dev_only}
+    ports:
+      - "127.0.0.1:${SENTINEL_DASHBOARD_PORT:-8858}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  api-docs:
+    image: docker.swagger.io/swaggerapi/swagger-ui:v5.32.11
+    restart: unless-stopped
+    environment:
+      SWAGGER_JSON: /contract/openapi.yaml
+      DISPLAY_OPERATION_ID: "true"
+      DEEP_LINKING: "true"
+      DOC_EXPANSION: list
+      TRY_IT_OUT_ENABLED: "true"
+      PERSIST_AUTHORIZATION: "true"
+      VALIDATOR_URL: none
+    ports:
+      - "127.0.0.1:${API_DOCS_PORT:-18081}:8080"
+    volumes:
+      - ../docs/api/openapi.yaml:/contract/openapi.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  business_pg_data:
+  ai_pg_data:
+  minio_data:
+  rabbitmq_data:
+  nacos_data:

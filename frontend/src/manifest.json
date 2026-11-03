@@ -1,0 +1,18 @@
+{
+  "name": "攀岩手部症状辅助表达",
+  "appid": "__UNI__SYMPTOM_DEMO",
+  "description": "用于学习 Spring Cloud 与有限步骤 Agent 的微信小程序演示前端",
+  "versionName": "0.1.0",
+  "versionCode": "100",
+  "transformPx": false,
+  "mp-weixin": {
+    "appid": "touristappid",
+    "setting": {
+      "urlCheck": false,
+      "es6": true,
+      "minified": true,
+      "postcss": true
+    },
+    "usingComponents": true
+  }
+}

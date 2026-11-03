@@ -1,0 +1,56 @@
+server:
+  port: 8080
+
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 3000
+            response-timeout: 10s
+          globalcors:
+            add-to-simple-url-handler-mapping: true
+            cors-configurations:
+              '[/**]':
+                allowedOrigins:
+                  - http://localhost:18081
+                  - http://127.0.0.1:18081
+                allowedMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+                allowedHeaders: ['*']
+                maxAge: 3600
+          routes:
+            # Backend controllers already include /api/{service}/v1; retain the full path.
+            - id: base-service-route
+              uri: lb://base-service
+              predicates:
+                - Path=/api/base/**
+            - id: image-service-route
+              uri: lb://image-service
+              predicates:
+                - Path=/api/image/**
+            - id: history-service-route
+              uri: lb://history-service
+              predicates:
+                - Path=/api/history/**
+            - id: ai-service-route
+              uri: lb://ai-service
+              metadata:
+                response-timeout: 150000
+              predicates:
+                - Path=/api/ai/**
+            - id: payment-service-route
+              uri: lb://payment-service
+              predicates:
+                - Path=/api/payment/**
+
+gateway:
+  sentinel:
+    # Development examples, per gateway instance; not measured capacity limits.
+    enabled: "${GATEWAY_SENTINEL_ENABLED:true}"
+    agent-advance-qps: "${GATEWAY_AGENT_ADVANCE_QPS:2}"
+    image-upload-qps: "${GATEWAY_IMAGE_UPLOAD_QPS:5}"
+    dashboard: "${SENTINEL_DASHBOARD:127.0.0.1:8858}"
+    transport-port: "${SENTINEL_TRANSPORT_PORT:8719}"
+    # The dashboard container must reach the Java process on the Windows host.
+    client-ip: "${SENTINEL_CLIENT_IP:host.docker.internal}"

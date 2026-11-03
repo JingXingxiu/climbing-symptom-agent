@@ -1,0 +1,73 @@
+server:
+  port: 8084
+
+spring:
+  datasource:
+    url: "jdbc:postgresql://${AI_POSTGRES_HOST:127.0.0.1}:${AI_POSTGRES_PORT:5433}/ai_db"
+    username: "${AI_POSTGRES_USER:symptom_ai}"
+    password: "${AI_POSTGRES_PASSWORD:symptom_ai_dev_only}"
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: ai-service-pool
+      maximum-pool-size: 5
+      minimum-idle: 0
+      connection-timeout: 3000
+  cloud:
+    openfeign:
+      client:
+        config:
+          agentHistoryClient:
+            connectTimeout: 3000
+            readTimeout: 10000
+          agentImageClient:
+            connectTimeout: 3000
+            readTimeout: 10000
+          agentPaymentClient:
+            connectTimeout: 2000
+            readTimeout: 3000
+
+mybatis-plus:
+  type-handlers-package: org.javaup.ai.persistence.typehandler
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: input
+
+ai:
+  payment-entitlement-breaker:
+    enabled: "${AI_PAYMENT_BREAKER_ENABLED:true}"
+    exception-ratio: 0.5
+    minimum-request-amount: 5
+    stat-interval-ms: 10000
+    open-seconds: 10
+  workflow:
+    default-provider: "${AI_MODEL_PROVIDER:zhipu}"
+    default-model: "${AI_MODEL_NAME:glm-4.6v-flash}"
+    max-model-calls: 20
+    max-steps: 40
+    execution-timeout-seconds: 120
+  models:
+    timeout: 45s
+    allowed-image-hosts: [localhost, 127.0.0.1, minio]
+    profiles:
+      qwen:
+        provider: qwen
+        model: qwen3.7-flash
+        base-url: "${QWEN_BASE_URL:https://dashscope.aliyuncs.com/compatible-mode/v1}"
+        api-key: "${QWEN_API_KEY:}"
+      zhipu:
+        provider: zhipu
+        model: "${ZHIPU_MODEL:glm-4.6v-flash}"
+        base-url: "${ZHIPU_BASE_URL:https://open.bigmodel.cn/api/paas/v4}"
+        api-key: "${ZHIPU_API_KEY:}"
+      openai:
+        provider: openai
+        model: "${OPENAI_MODEL:}"
+        base-url: "${OPENAI_BASE_URL:https://api.openai.com/v1}"
+        api-key: "${OPENAI_API_KEY:}"
+  search:
+    enabled: "${AI_SEARCH_ENABLED:false}"
+    api-key: "${ZHIPU_SEARCH_API_KEY:}"
+    engine: search_std
+    timeout: 5s

@@ -1,0 +1,27 @@
+spring:
+  # 模型由配置白名单手工创建；启动不要求OpenAI密钥，也不启用无关的音频/embedding客户端。
+  autoconfigure:
+    exclude:
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiChatAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiEmbeddingAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiImageAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiAudioSpeechAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiAudioTranscriptionAutoConfiguration
+      - org.springframework.ai.model.openai.autoconfigure.OpenAiModerationAutoConfiguration
+  application:
+    name: ai-service
+  config:
+    import:
+      - "nacos:${spring.application.name}-dev.yaml?group=CLIMBING_DEV&refreshEnabled=false"
+      # 本机密钥文件不进 Git、不打入 JAR；兼容从模块、backend 或项目根目录启动。
+      - "optional:file:./ai-service.local.properties"
+      - "optional:file:./service/ai/ai-service.local.properties"
+      - "optional:file:./backend/service/ai/ai-service.local.properties"
+  cloud:
+    nacos:
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        group: CLIMBING_DEV
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        group: CLIMBING_DEV

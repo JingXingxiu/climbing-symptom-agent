@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: history-service
+  config:
+    import: "nacos:${spring.application.name}-dev.yaml?group=CLIMBING_DEV&refreshEnabled=false"
+  cloud:
+    nacos:
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        group: CLIMBING_DEV
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        group: CLIMBING_DEV
+
+mybatis-plus:
+  type-handlers-package: org.javaup.history.persistence.typehandler

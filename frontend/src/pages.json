@@ -1,0 +1,46 @@
+{
+  "pages": [
+    {
+      "path": "pages/home/index",
+      "style": { "navigationBarTitleText": "手部症状辅助表达" }
+    },
+    {
+      "path": "pages/assessment/start",
+      "style": { "navigationBarTitleText": "基础情况" }
+    },
+    {
+      "path": "pages/assessment/location",
+      "style": { "navigationBarTitleText": "不适位置" }
+    },
+    {
+      "path": "pages/annotation/editor",
+      "style": { "navigationBarTitleText": "标记不适区域" }
+    },
+    {
+      "path": "pages/agent/index",
+      "style": { "navigationBarTitleText": "辅助追问" }
+    },
+    {
+      "path": "pages/result/index",
+      "style": { "navigationBarTitleText": "信息整理结果" }
+    },
+    {
+      "path": "pages/payment/index",
+      "style": { "navigationBarTitleText": "套餐与额度" }
+    },
+    {
+      "path": "pages/history/index",
+      "style": { "navigationBarTitleText": "历史记录" }
+    },
+    {
+      "path": "pages/history/detail",
+      "style": { "navigationBarTitleText": "记录详情" }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "症状辅助表达",
+    "navigationBarBackgroundColor": "#F4F6F8",
+    "backgroundColor": "#F4F6F8"
+  }
+}

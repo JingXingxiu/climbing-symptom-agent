@@ -1,0 +1,41 @@
+# Dependencies and generated output (all modules)
+node_modules/
+target/
+dist/
+build/
+coverage/
+.gradle/
+/tmp/
+/output/
+
+# Local environment and IDE state
+.env
+.env.*
+!.env.example
+!.env.*.example
+.idea/
+.vscode/
+*.local
+*.local.properties
+application-local.yaml
+application-local.yml
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+.mvn/wrapper/maven-wrapper.jar
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+pnpm-debug.log*

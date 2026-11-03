@@ -1,0 +1,25 @@
+server:
+  port: 8085
+
+spring:
+  datasource:
+    url: "jdbc:postgresql://${BUSINESS_POSTGRES_HOST:127.0.0.1}:${BUSINESS_POSTGRES_PORT:5432}/payment_db"
+    username: "${BUSINESS_POSTGRES_USER:symptom_app}"
+    password: "${BUSINESS_POSTGRES_PASSWORD:symptom_dev_only}"
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: payment-service-pool
+      maximum-pool-size: 5
+      minimum-idle: 0
+      connection-timeout: 3000
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: input
+
+payment:
+  # Also requires an explicitly active dev profile. Never enable in production.
+  mock-enabled: "${PAYMENT_MOCK_ENABLED:true}"

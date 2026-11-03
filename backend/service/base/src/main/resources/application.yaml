@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: base-service
+  config:
+    import: "nacos:${spring.application.name}-dev.yaml?group=CLIMBING_DEV&refreshEnabled=false"
+  cloud:
+    nacos:
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        group: CLIMBING_DEV
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        group: CLIMBING_DEV
+
+base:
+  wechat:
+    app-id: ${WECHAT_APP_ID:}
+    secret: ${WECHAT_APP_SECRET:}
+    connect-timeout: 3s
+    read-timeout: 5s
+  auth:
+    secret: ${BASE_JWT_SECRET:}
+    issuer: climbing-base-service
+    audience: climbing-api
+    ttl: 2h
+
+mybatis-plus:
+  type-handlers-package: org.javaup.base.persistence.typehandler

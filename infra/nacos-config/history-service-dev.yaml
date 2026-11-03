@@ -1,0 +1,21 @@
+server:
+  port: 8083
+
+spring:
+  datasource:
+    url: "jdbc:postgresql://${BUSINESS_POSTGRES_HOST:127.0.0.1}:${BUSINESS_POSTGRES_PORT:5432}/history_db"
+    username: "${BUSINESS_POSTGRES_USER:symptom_app}"
+    password: "${BUSINESS_POSTGRES_PASSWORD:symptom_dev_only}"
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: history-service-pool
+      maximum-pool-size: 5
+      minimum-idle: 1
+      connection-timeout: 3000
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: input

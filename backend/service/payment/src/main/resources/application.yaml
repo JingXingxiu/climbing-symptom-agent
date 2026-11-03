@@ -1,0 +1,28 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: payment-service
+  config:
+    import: "nacos:${spring.application.name}-dev.yaml?group=CLIMBING_DEV&refreshEnabled=false"
+  cloud:
+    nacos:
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        group: CLIMBING_DEV
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:127.0.0.1:8848}
+        group: CLIMBING_DEV
+  sql:
+    init:
+      mode: never
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+
+payment:
+  mock-enabled: false
+
+mybatis-plus:
+  type-handlers-package: org.javaup.payment.persistence.typehandler

@@ -1,0 +1,2260 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: AI 手部症状辅助分析系统 API Contract
+  version: 0.2.0
+  description: |
+    面向微信小程序 MVP 的契约先行接口。契约按 `base-service`、`image-service`、
+    `history-service`、`ai-service`、`payment-service` 标明数据所有权，但不规定服务间调用方向、
+    OpenFeign、重试、熔断、降级或 MQ 编排。
+
+    本系统只帮助用户结构化表达手部不适症状（包括疼痛、麻木、肿胀等）并给出
+    是否值得进一步寻求专业帮助的提示，不提供医学诊断。
+    `ai-service` 提供有限步骤分析、暂停恢复、历史改答和结果定稿接口。
+    前端默认仍使用本地 Mock；HTTP Adapter 显式调用 advance，不在失败时退回 Mock。
+    Gateway 的分析执行与图片上传分组采用 Sentinel 限流，拒绝返回 429 GATEWAY_RATE_LIMITED；
+    它区别于 AI_DAILY_QUOTA_EXCEEDED。AI 到 Payment 权益读取熔断时返回
+    503 PAYMENT_ENTITLEMENT_UNAVAILABLE，不返回免费权益或执行模型。
+servers:
+  - url: http://localhost:8080
+    description: 本地 Gateway（启动后可在 Swagger UI 中直接调试）
+  - url: https://api.example.invalid
+    description: Gateway 占位地址，部署时替换
+tags:
+  - name: Base / Auth
+    description: base-service｜登录
+  - name: Base / User
+    description: base-service｜用户账号与基础资料
+  - name: Image / Picture
+    description: image-service｜MinIO 对象元数据与图片处理状态
+  - name: Image / Annotation
+    description: image-service｜归一化图片标注
+  - name: Image / Internal
+    description: image-service｜服务间批量查询，不经 Gateway 对外路由
+  - name: History / Assessment
+    description: history-service｜Assessment、恢复与症状历史
+  - name: History / Result
+    description: history-service｜最终业务结果
+  - name: History / Internal
+    description: history-service｜可信服务间的输入快照和结果定稿
+  - name: AI / Agent
+    description: ai-service｜有界分析任务；默认前端 Mock，真实模型需另行配置
+  - name: AI / Quota
+    description: ai-service｜按用户和上海日期统计的模型执行额度
+  - name: Payment / Order
+    description: payment-service｜演示套餐和模拟订单，不连接真实支付平台
+  - name: Payment / Entitlement
+    description: payment-service｜套餐权益，AI 用量由 ai-service 独立管理
+  - name: Payment / Internal
+    description: payment-service｜可信服务间权益查询，不经 Gateway 路由
+security:
+  - bearerAuth: []
+
+paths:
+  /api/base/v1/auth/wechat-login:
+    post:
+      tags: [Base / Auth]
+      operationId: loginWithWechatCode
+      x-service-owner: base-service
+      security: []
+      summary: 使用微信临时登录凭证登录
+      description: |
+        使用 wx.login 的一次性 code 向微信换取 OpenID，首次创建账号与资料，后续复用账号。
+        返回 HS256 JWT（sub 为用户 UUID，含 iss/aud/iat/exp/jti），默认有效期两小时。
+        不返回 OpenID 或 session_key；displayName 仅初始化新用户，avatarUrl 当前不保存。
+        缺少微信或签名配置返回 503，不模拟登录成功。Gateway 已提供统一 JWT 验签与可信身份透传过滤器；真实部署和 Nacos 联调仍待验证。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WechatLoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/base/v1/users/me:
+    get:
+      tags: [Base / User]
+      operationId: getCurrentUser
+      x-service-owner: base-service
+      summary: 获取当前用户基础资料
+      description: 接收可信内部 X-User-Id；Gateway 已提供 JWT 校验、外部身份头清理与 sub 注入实现，真实部署和 Nacos 联调仍待验证。
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Base / User]
+      operationId: updateCurrentUser
+      x-service-owner: base-service
+      summary: 修改当前用户基础资料
+      description: |
+        version 必填；未提供的字段保留，显式 null 清空。只传 version 时不写库、不递增版本。
+        成功修改后 version 加一；陈旧版本返回 409。avatarPictureId 仅保存外部业务引用。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserProfileRequest'
+      responses:
+        '200':
+          description: 修改后的资料
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/image/v1/pictures:
+    post:
+      tags: [Image / Picture]
+      operationId: uploadPicture
+      x-service-owner: image-service
+      summary: 上传一个视觉来源
+      description: |
+        上传用户照片或 3D 固定视角快照。客户端多图选择后以有限并发逐张调用；
+        `clientRequestId` 用于安全重试。原图进入 MinIO，数据库只保存元数据。
+        `STANDARD_REFERENCE` 是系统预置资源，普通客户端通过标准图片列表读取而不是上传。
+        `metadata` 首选使用 `application/json` part；也兼容 `uni.uploadFile` 的
+        `formData.metadata = JSON.stringify(metadata)` 普通字符串字段，其内容仍须符合下方对象 schema。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, metadata]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                metadata:
+                  $ref: '#/components/schemas/PictureUploadMetadata'
+            encoding:
+              metadata:
+                contentType: application/json
+      responses:
+        '201':
+          description: 图片已接收；异步处理可能仍在进行
+          headers:
+            Location:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PictureResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+
+  /api/image/v1/standard-pictures:
+    get:
+      tags: [Image / Picture]
+      operationId: listStandardPictures
+      x-service-owner: image-service
+      summary: 获取系统提供的标准手部图片
+      parameters:
+        - name: handSide
+          in: query
+          schema: { $ref: '#/components/schemas/HandSide' }
+        - name: view
+          in: query
+          schema: { $ref: '#/components/schemas/StandardPictureView' }
+      responses:
+        '200':
+          description: 可用标准图片
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PictureResponse' }
+
+  /api/image/v1/pictures/{pictureId}:
+    parameters:
+      - $ref: '#/components/parameters/PictureId'
+    get:
+      tags: [Image / Picture]
+      operationId: getPicture
+      x-service-owner: image-service
+      summary: 获取图片元数据、处理状态和可访问 URL
+      responses:
+        '200':
+          description: 图片详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PictureResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Image / Picture]
+      operationId: deletePicture
+      x-service-owner: image-service
+      summary: 逻辑删除当前用户拥有的图片
+      responses:
+        '204':
+          description: 已删除或此前已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/image/v1/pictures/{pictureId}/annotation-set:
+    parameters:
+      - $ref: '#/components/parameters/PictureId'
+    get:
+      tags: [Image / Annotation]
+      operationId: getPictureAnnotationSet
+      x-service-owner: image-service
+      summary: 获取图片的当前标注集
+      parameters:
+        - name: assessmentId
+          in: query
+          required: true
+          description: 标准图片可被多人复用，必须以 Assessment 区分标注集。
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 当前标注集
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnnotationSetResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Image / Annotation]
+      operationId: replacePictureAnnotationSet
+      x-service-owner: image-service
+      summary: 创建或整体替换图片标注集
+      description: |
+        使用 `version` 做乐观并发控制。所有坐标均以原图左上角为原点，归一化至
+        `[0,1]`；服务端不得将红圈永久烧入唯一原图。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceAnnotationSetRequest'
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnnotationSetResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /internal/image/visual-references/resolve:
+    post:
+      tags: [Image / Internal]
+      operationId: resolveVisualReferences
+      x-service-owner: image-service
+      x-internal: true
+      servers:
+        - url: http://localhost:8082
+          description: 直连 image-service；服务间通过注册发现调用，不经过 Gateway
+      security: []
+      summary: 批量校验并解析 Assessment 图片引用
+      description: |
+        仅供服务间调用。一次请求检查全部图片是否未删除、属于当前用户或为公共标准图，
+        且状态为 AVAILABLE；任一图片不合法则整批失败，不静默丢弃。
+        在同一只读快照内批量查询图片和当前用户/Assessment 的标注集，缺标注合法并返回 null。
+        响应保持请求顺序，只返回业务 ID 和来源，不返回签名 URL、图形或图片内容。
+        非空成功请求固定两次批量 SELECT，空数组不查询数据库并返回空数组。
+        当前尚未实现服务身份认证，X-User-Id 必须来自可信内部调用链；
+        /internal 路径本身不是认证机制。现有 Gateway 路由不转发此路径，部署时仍须限制服务端口访问。
+      parameters:
+        - name: X-User-Id
+          in: header
+          required: true
+          description: 可信内部调用链传递的当前用户 ID，不是任意外部客户端可声明的身份。
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveVisualReferencesRequest'
+      responses:
+        '200':
+          description: 全部校验通过，按请求顺序返回引用；空请求返回空数组。
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 12
+                items: { $ref: '#/components/schemas/ResolvedVisualReference' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /internal/image/agent-pictures/resolve:
+    post:
+      tags: [Image / Internal]
+      operationId: resolveAgentPictures
+      x-service-owner: image-service
+      x-internal: true
+      servers:
+        - url: http://localhost:8082
+          description: 直连 image-service；Gateway 不路由 /internal
+      security: []
+      summary: 批量读取 AI 所需的图片元数据和标注快照
+      description: |
+        仅可信内部服务调用；X-User-Id 不代替服务身份认证，部署时限制服务端口访问。
+        校验公共标准图或当前用户归属、未删除、AVAILABLE 与有效尺寸；任一失败则整批失败。
+        最多三次批量 SELECT，保持请求顺序，空数组不查询。包含完整标注形状与版本、3D viewState。
+        originalUrl 为短期 GET 签名，仅供即时访问；AI 冻结输入时删除该字段，后续按 pictureId 重新获取。
+      parameters:
+        - $ref: '#/components/parameters/TrustedUserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResolveAgentPicturesRequest'
+      responses:
+        '200':
+          description: 按请求顺序返回的图片与标注
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 12
+                items: { $ref: '#/components/schemas/ResolvedAgentPicture' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /internal/history/assessments/{assessmentId}/agent-input:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+      - $ref: '#/components/parameters/TrustedUserId'
+    get:
+      tags: [History / Internal]
+      operationId: getAgentAssessmentInput
+      x-service-owner: history-service
+      x-internal: true
+      servers:
+        - url: http://localhost:8083
+          description: 直连 history-service；Gateway 不路由 /internal
+      security: []
+      summary: 读取当前用户已提交 Assessment 的一致性输入
+      description: |
+        仅可信服务间调用，部署时限制服务端口访问。只读快照包含提交凭据、聚合视图和稳定输入摘要。
+        DRAFT、CANCELLED 或无提交凭据返回 409；已完成记录允许创建新的分析任务。
+        摘要覆盖基础症状、位置与视觉引用，不将追加答案、乐观版本或更新时间混入输入一致性判断。
+      responses:
+        '200':
+          description: 提交凭据与 Assessment 聚合
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentAssessmentInputResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /internal/history/assessments/{assessmentId}/agent-results:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+      - $ref: '#/components/parameters/TrustedUserId'
+    post:
+      tags: [History / Internal]
+      operationId: finalizeAgentAssessmentResult
+      x-service-owner: history-service
+      x-internal: true
+      servers:
+        - url: http://localhost:8083
+          description: 直连 history-service；Gateway 不路由 /internal
+      security: []
+      summary: 幂等保存 Agent 定稿结果及当前结果投影
+      description: |
+        仅可信服务间调用，部署时限制服务端口访问。以 sessionId 去重，同 Session 异内容返回 409。
+        锁定所属 Assessment，在一个 History 本地事务中追加结果历史、更新当前结果和完成状态。
+        校验已提交凭据、稳定输入摘要与分析 attemptNo；旧任务不能覆盖已经定稿的新任务结果。
+        sessionId/stepId/checkpointId 是跨服务业务引用，没有跨库外键。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeAgentResultRequest'
+      responses:
+        '200':
+          description: 新定稿或幂等重放的同一个结果版本
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FinalizedAgentResultResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/history/v1/assessments:
+    post:
+      tags: [History / Assessment]
+      operationId: createAssessment
+      x-service-owner: history-service
+      summary: 创建手部症状 Assessment 草稿
+      description: |
+        可以先创建空草稿；进入下一步或提交前再校验首次必要输入是否完整。
+        同一用户重试同一次创建意图时必须复用 `X-Idempotency-Key`。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAssessmentRequest'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [History / Assessment]
+      operationId: listAssessments
+      x-service-owner: history-service
+      summary: 分页查询当前用户的症状记录历史
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/AssessmentStatus'
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200':
+          description: 历史记录页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentPageResponse'
+
+  /api/history/v1/assessments/{assessmentId}:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    get:
+      tags: [History / Assessment]
+      operationId: getAssessment
+      x-service-owner: history-service
+      summary: 获取 Assessment 完整详情
+      responses:
+        '200':
+          description: Assessment 详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [History / Assessment]
+      operationId: updateAssessmentBasics
+      x-service-owner: history-service
+      summary: 更新首次采集的基础信息
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAssessmentBasicsRequest'
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/history/v1/assessments/{assessmentId}/resume:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    get:
+      tags: [History / Assessment]
+      operationId: resumeAssessment
+      x-service-owner: history-service
+      summary: 获取继续填写所需的恢复视图
+      description: |
+        只读取当前用户的记录，不更新保存时间。完成记录返回 RESULT 步骤，取消记录返回 409。
+        History 不反向调用 AI，activeAgentSessionId 仍返回 null。
+        客户端通过 AI 的 GET /api/ai/v1/agent-sessions/active?assessmentId=... 独立找回未结束任务。
+      responses:
+        '200':
+          description: 恢复视图
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentResumeResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/history/v1/assessments/{assessmentId}/symptom-locations:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    put:
+      tags: [History / Assessment]
+      operationId: replaceSymptomLocations
+      x-service-owner: history-service
+      summary: 整体替换稳定的粗粒度症状位置列表
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceSymptomLocationsRequest'
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SymptomLocationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    delete:
+      tags: [History / Assessment]
+      operationId: clearSymptomLocations
+      x-service-owner: history-service
+      summary: 清除当前粗粒度症状位置列表
+      description: 更换手别或重新定位时使用；重复调用保持幂等。
+      responses:
+        '204':
+          description: 已清除或原本不存在
+
+  /api/history/v1/assessments/{assessmentId}/visual-references:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    put:
+      tags: [History / Assessment]
+      operationId: replaceVisualReferences
+      x-service-owner: history-service
+      summary: 替换 Assessment 关联的视觉来源列表
+      description: |
+        只保存 image-service 业务 ID，不建立跨数据库外键。请求中的 `version`
+        用于确认客户端基于当前 Assessment 修改列表；该子资源 PUT 本身不递增
+        `Assessment.version`，父资源版本只由基础信息 PATCH 或 submit 推进。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceVisualReferencesRequest'
+      responses:
+        '200':
+          description: 当前视觉来源列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VisualReference'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/history/v1/assessments/{assessmentId}/answers:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    post:
+      tags: [History / Assessment]
+      operationId: appendAssessmentAnswer
+      x-service-owner: history-service
+      summary: 追加一个可选或 Agent 动态问题答案
+      description: |
+        同一 Assessment 内 `clientAnswerId` 唯一，并作为答案写入的幂等标识；
+        客户端重试同一次回答时必须复用该值。相同键与完整内容返回已存答案，改内容返回 409。
+        `sequenceNumber` 在同一 Assessment 内唯一、允许间隔，不要求从 1 连续递增。
+        新增答案要求已成功 submit；草稿或无提交凭据返回 409 ASSESSMENT_NOT_SUBMITTED。
+        追加答案保留当前业务状态；已有答案的有效幂等重放不要求重新提交。
+        新答案与根版本/保存时间在同一事务持久化；重放不重复写入，即使记录后来已经完成。
+        本接口不产生下一问、不运行模型；source 是调用方提供的标签，不是执行 AI 的证明。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppendAssessmentAnswerRequest'
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentAnswerResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/history/v1/assessments/{assessmentId}/submit:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    post:
+      tags: [History / Assessment]
+      operationId: submitAssessment
+      x-service-owner: history-service
+      summary: 提交当前 Assessment
+      description: |
+        仅改变 history-service 拥有的业务状态。后续由谁启动 AI、如何调用或降级，
+        留给 Spring Cloud 学习阶段决定，本契约不固化编排。
+        校验精简基础输入，以及至少一条粗定位或一张关联图片；症状类型不额外强制必填。
+        仅推进到 AGENT 步骤，DRAFT 变为 COLLECTING，已有 COLLECTING/CLARIFYING 保留。
+        不启动真实 Agent、不生成结果、不设置 COMPLETED/completedAt。
+        使用内部提交凭据与请求 version 保证幂等，不以客户端可编辑的 currentStepKey 判断已提交。
+        最近提交使用的旧版本重放，或没有后续修改时用提交后的当前版本再次提交，均不产生新副作用。
+        有新修改时以最新版本重新校验提交；其他版本不匹配返回 409。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitAssessmentRequest'
+      responses:
+        '200':
+          description: 提交后的 Assessment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /api/history/v1/assessments/{assessmentId}/result:
+    parameters:
+      - $ref: '#/components/parameters/AssessmentId'
+    get:
+      tags: [History / Result]
+      operationId: getAssessmentResult
+      x-service-owner: history-service
+      summary: 获取最终业务结果
+      description: |
+        只读取当前用户已完成记录的持久化结果，保留 generatedBy、安全声明与最终时间。
+        未完成或没有结果返回 404，不创建 Mock/规则/AI 结果。
+      responses:
+        '200':
+          description: 辅助分析结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessmentResultResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/ai/v1/agent-sessions:
+    post:
+      tags: [AI / Agent]
+      operationId: createAgentSession
+      x-service-owner: ai-service
+      summary: 幂等创建一次有限步骤分析任务
+      description: |
+        读取已提交的 Assessment，冻结基础信息、位置与图片标注输入，创建初始 Checkpoint。
+        不隐式调用模型；客户端随后显式调用 advance。模型选择来自服务配置白名单。
+        sourceSessionId/sourceCheckpointId 成对提供，用于从已结束任务的历史状态重新分析。
+        相同幂等键及请求重放原任务，不重置预算；同一 Assessment 同时最多一个未结束任务。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentSessionRequest'
+      responses:
+        '201':
+          description: 已创建或按幂等键重放的 Session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/ai/v1/agent-sessions/active:
+    get:
+      tags: [AI / Agent]
+      operationId: getActiveSession
+      x-service-owner: ai-service
+      summary: 按 Assessment 查找当前用户的未结束任务
+      description: |
+        用于清理本地缓存或换设备后找回 Session ID。包含 CREATED、RUNNING、WAITING_FOR_USER、PAUSED、FAILED。
+        只读，不自动恢复暂停/失败任务或启动模型。未找到返回 404；客户端仅在此 404 后允许创建新任务。
+        不需要 History 调用 AI；客户端直接查询当前服务持有的任务状态。
+      parameters:
+        - name: assessmentId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 当前未结束 Session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/ai/v1/agent-sessions/{sessionId}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [AI / Agent]
+      operationId: getAgentSession
+      x-service-owner: ai-service
+      summary: 读取当前分支状态、版本与检查点
+      description: 只读，不隐式调用模型、恢复暂停任务或接管运行中的执行。
+      responses:
+        '200':
+          description: 当前 Session 视图
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/ai/v1/agent-sessions/{sessionId}/responses:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      tags: [AI / Agent]
+      operationId: answerAgentQuestion
+      x-service-owner: ai-service
+      summary: 保存当前问题的回答
+      description: expectedVersion 与 baseCheckpointId 校验起点；重试复用幂等键。同键不同内容返回 409。接受回答后返回 CREATED，客户端显式 advance；幂等回放不会重新激活旧分支。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnswerAgentQuestionRequest'
+      responses:
+        '200':
+          description: 操作后当前 Session；不会隐式执行下一轮模型调用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/ai/v1/agent-sessions/{sessionId}/advance:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [AI / Agent]
+      operationId: advanceAgentSession
+      x-service-owner: ai-service
+      x-client-timeout-ms: 150000
+      summary: 显式执行至下一次用户等待或结果候选
+      description: |
+        先在事务外读取 Payment 权益，再在短事务原子预占用户每日额度、Session 预算并记录模型调用。
+        模型调用在事务外执行，随后核对执行代次与起点提交结果。
+        暂停或改答后的迟到响应不得推进任务。客户端每次业务动作只显式推进一次，等待上限 150 秒。
+        HTTP 超时不自动重发 advance；保留 Session ID，先 GET 读取状态，超时执行由用户显式 resume 接管。
+        失败不伪造成功，不自动无限重试，不回退 Mock。
+        预占事务提交后调用失败仍计次；429 AI_DAILY_QUOTA_EXCEEDED 表示当日额度耗尽。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentVersionRequest'
+      responses:
+        '200':
+          description: 操作后当前 Session；不会隐式执行下一轮模型调用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/ai/v1/agent-sessions/{sessionId}/pause:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [AI / Agent]
+      operationId: pauseAgentSession
+      x-service-owner: ai-service
+      summary: 暂停当前分析
+      description: 保留最近已提交的 Checkpoint，递增执行代次使旧响应失效；不保证供应商立即停止已经发出的模型请求。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentVersionRequest'
+      responses:
+        '200':
+          description: 操作后当前 Session；不会隐式执行下一轮模型调用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/ai/v1/agent-sessions/{sessionId}/resume:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [AI / Agent]
+      operationId: resumeAgentSession
+      x-service-owner: ai-service
+      summary: 恢复暂停或可重试失败任务
+      description: 从当前 Checkpoint 恢复，已消耗的预算不重置；允许按期限接管超时的 RUNNING 执行。恢复为 CREATED 时由客户端再显式 advance。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentVersionRequest'
+      responses:
+        '200':
+          description: 操作后当前 Session；不会隐式执行下一轮模型调用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/ai/v1/agent-sessions/{sessionId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [AI / Agent]
+      operationId: cancelAgentSession
+      x-service-owner: ai-service
+      summary: 取消本次分析
+      description: 使旧执行失效并保留历史节点；取消后如需重新分析，创建带来源的新 Session。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentVersionRequest'
+      responses:
+        '200':
+          description: 操作后当前 Session；不会隐式执行下一轮模型调用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/ai/v1/agent-sessions/{sessionId}/revise-answer:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/IdempotencyKey'
+    post:
+      tags: [AI / Agent]
+      operationId: reviseAgentAnswer
+      x-service-owner: ai-service
+      summary: 从历史回答之前分叉并保存新回答
+      description: answerStepId 指向本任务的 USER_INPUT 节点；读取它之前的 Checkpoint 建立新分支，旧回答及后续节点保留。步骤编号、版本和累计预算继续增长。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviseAgentAnswerRequest'
+      responses:
+        '200':
+          description: 操作后当前 Session；不会隐式执行下一轮模型调用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/ai/v1/agent-sessions/{sessionId}/model:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [AI / Agent]
+      operationId: changeAgentModel
+      x-service-owner: ai-service
+      summary: 更换后续调用所用模型
+      description: 只接受服务配置白名单中的 provider/model；更新执行代次使旧调用失效，不修改历史 ModelCall 中的实际模型。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeAgentModelRequest'
+      responses:
+        '200':
+          description: 操作后当前 Session；不会隐式执行下一轮模型调用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSessionResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/ai/v1/agent-sessions/{sessionId}/steps:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [AI / Agent]
+      operationId: listAgentSteps
+      x-service-owner: ai-service
+      summary: 读取本任务所有分支的有界步骤列表
+      description: parentStepId 表达树结构；不能把所有分支按序号拼成当前模型上下文。
+      responses:
+        '200':
+          description: 本任务步骤，数量受整个 Session 的 maxSteps 限制
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AgentStepSummary' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/ai/v1/agent-sessions/{sessionId}/outcome:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [AI / Agent]
+      operationId: getAgentOutcome
+      x-service-owner: ai-service
+      summary: 读取已完成 Agent 的结果候选
+      description: 此结果保存在 AI Checkpoint 中；尚不等于 History 已经接受定稿。
+      responses:
+        '200':
+          description: 当前任务结果候选
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentOutcomeResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/ai/v1/agent-sessions/{sessionId}/finalize:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [AI / Agent]
+      operationId: finalizeAgentOutcome
+      x-service-owner: ai-service
+      summary: 将已完成结果幂等提交到 History
+      description: |
+        按已完成 Session 的结果快照提交。此操作不更改 AI 当前分支，因此无 expectedVersion 请求体。
+        History 在本地事务中保存结果历史、更新当前结果与 Assessment 状态。
+        重试同一 Session 不生成第二份结果；跨服务失败可显式重试，不伪装成跨库原子事务。
+      responses:
+        '200':
+          description: History 已接受的结果版本
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentFinalizationResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/payment/v1/plans:
+    get:
+      tags: [Payment / Order]
+      operationId: listPaymentPlans
+      x-service-owner: payment-service
+      summary: 查询当前可购买的演示套餐
+      description: 金额单位为分；只展示服务端启用的套餐，客户端不能指定价格或额度。
+      responses:
+        '200':
+          description: 套餐数组，当前 PLUS 为 1990 分、30 天、每天 50 次
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PaymentPlanResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/payment/v1/orders:
+    get:
+      tags: [Payment / Order]
+      operationId: listPaymentOrders
+      x-service-owner: payment-service
+      summary: 查询当前用户最近的订单
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200':
+          description: 按创建时间倒序返回的订单数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PaymentOrderResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Payment / Order]
+      operationId: createPaymentOrder
+      x-service-owner: payment-service
+      summary: 幂等创建模拟套餐订单
+      description: |
+        只接收套餐编码，价格、额度和有效期由服务端读取并冻结在订单中。
+        同一用户和幂等键重试返回原订单；同键更换套餐返回 409。
+        PENDING 订单在创建后 30 分钟内允许模拟支付，不收取真实款项。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreatePaymentOrderRequest' }
+      responses:
+        '201':
+          description: 新建或幂等重放的订单
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentOrderResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/payment/v1/orders/{orderId}:
+    parameters:
+      - $ref: '#/components/parameters/PaymentOrderId'
+    get:
+      tags: [Payment / Order]
+      operationId: getPaymentOrder
+      x-service-owner: payment-service
+      summary: 查询当前用户的单个订单
+      description: 支付响应丢失时读取此接口确认状态；其他用户的订单返回 404。
+      responses:
+        '200':
+          description: 当前订单快照
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentOrderResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/payment/v1/orders/{orderId}/mock-pay:
+    parameters:
+      - $ref: '#/components/parameters/PaymentOrderId'
+    post:
+      tags: [Payment / Order]
+      operationId: confirmMockPayment
+      x-service-owner: payment-service
+      summary: 开发环境模拟支付成功并开通权益
+      description: |
+        不连接第三方、不扣真实款项。要求显式 dev profile 且 payment.mock-enabled=true，
+        prod/production 环境始终禁止；未启用返回 403 MOCK_PAYMENT_DISABLED。
+        锁定当前用户订单；已 PAID 的订单直接返回，不重复开通。
+        订单支付和权益开通在 payment_db 同一事务内完成。
+        同用户不同订单通过权益行锁顺序续期；有效期从 max(当前时间, 原有效期) 延长。
+        超过 expiresAt 的 PENDING 订单返回 409，不能由前端自行标为成功。
+      responses:
+        '200':
+          description: 已支付订单（包含安全重放）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentOrderResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/payment/v1/entitlement:
+    get:
+      tags: [Payment / Entitlement]
+      operationId: getPaymentEntitlement
+      x-service-owner: payment-service
+      summary: 查询当前用户的有效套餐权益
+      description: 无购买记录或权益到期时返回 FREE，每日 10 次；当前 PLUS 为每日 50 次。
+      responses:
+        '200':
+          description: 当前有效权益，不含 AI 已用次数
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentEntitlementResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /internal/payment/entitlement:
+    parameters:
+      - $ref: '#/components/parameters/TrustedUserId'
+    get:
+      tags: [Payment / Internal]
+      operationId: getInternalPaymentEntitlement
+      x-service-owner: payment-service
+      x-internal: true
+      security: []
+      servers:
+        - url: http://localhost:8085
+          description: 可信服务直连 payment-service；Gateway 不路由 /internal
+      summary: AI 执行前读取当前用户的额度资格
+      description: 必须部署在受限服务网络；X-User-Id 来自可信服务，不能接受外部客户端伪造。
+      responses:
+        '200':
+          description: 与公共权益接口相同的当前有效权益
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentEntitlementResponse' }
+
+  /api/ai/v1/quota:
+    get:
+      tags: [AI / Quota]
+      operationId: getAgentDailyQuota
+      x-service-owner: ai-service
+      summary: 查询当前用户当天的模型执行额度
+      description: |
+        先在事务外查询 Payment 权益，再读取 AI 当日用量；查询本身不扣额度。
+        业务日期按 Asia/Shanghai。所有 Session 共享每日使用量，续购不清零当日计数。
+        advance 的执行预占事务使用条件 upsert 原子扣额度；提交后即使图片或模型失败仍计次，
+        事务回滚不计次。额度耗尽返回 429 AI_DAILY_QUOTA_EXCEEDED；每 Session 预算仍独立保留。
+        Payment 不可用时返回 503，不降级为无限额度。
+      responses:
+        '200':
+          description: 当前资格、上海日期和剩余用量
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentQuotaResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TrustedUserId:
+      name: X-User-Id
+      in: header
+      required: true
+      description: 可信内部调用链传递的当前用户 UUID；必须在受限服务网络内使用，不能由外部客户端自行声明。
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: X-Idempotency-Key
+      in: header
+      required: true
+      description: 客户端为一次业务意图生成的 UUID；安全重试必须复用同一个值。
+      schema: { type: string, format: uuid }
+    PictureId:
+      name: pictureId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AssessmentId:
+      name: assessmentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentOrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: 请求格式或字段非法
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: 未登录或凭证失效
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: 账号已禁用或当前操作被禁止
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    BadGateway:
+      description: 上游响应异常
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ServiceUnavailable:
+      description: 必要配置缺失或上游暂时不可用
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: 资源不存在或当前用户无权访问
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: 幂等键冲突、版本冲突或状态不允许
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnprocessableEntity:
+      description: 语法正确但缺少推进业务所需的信息
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: 文件超过服务端限制
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    UnsupportedMediaType:
+      description: 不支持的图片格式
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TooManyRequests:
+      description: 请求过于频繁或当天 AI 模型执行额度已耗尽
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    CreatePaymentOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [planCode]
+      properties:
+        planCode: { type: string, minLength: 1, maxLength: 40, examples: [PLUS] }
+
+    PaymentPlanResponse:
+      type: object
+      required: [planCode, name, priceCents, currency, durationDays, dailyModelCallLimit]
+      properties:
+        planCode: { type: string, examples: [PLUS] }
+        name: { type: string }
+        priceCents: { type: integer, minimum: 1, description: 演示价格，单位为分，不实际扣款 }
+        currency: { type: string, enum: [CNY] }
+        durationDays: { type: integer, minimum: 1 }
+        dailyModelCallLimit: { type: integer, minimum: 1 }
+
+    PaymentOrderResponse:
+      type: object
+      required:
+        [orderId, planCode, planName, priceCents, currency, durationDays,
+         dailyModelCallLimit, status, expiresAt, paidAt, createdAt, updatedAt]
+      properties:
+        orderId: { type: string, format: uuid }
+        planCode: { type: string }
+        planName: { type: string }
+        priceCents: { type: integer, minimum: 1 }
+        currency: { type: string, enum: [CNY] }
+        durationDays: { type: integer, minimum: 1 }
+        dailyModelCallLimit: { type: integer, minimum: 1 }
+        status: { type: string, enum: [PENDING, PAID] }
+        expiresAt: { type: string, format: date-time }
+        paidAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    PaymentEntitlementResponse:
+      type: object
+      required: [userId, planCode, planName, dailyModelCallLimit, validUntil]
+      properties:
+        userId: { type: string, format: uuid }
+        planCode: { type: string, examples: [FREE, PLUS] }
+        planName: { type: string }
+        dailyModelCallLimit: { type: integer, minimum: 1 }
+        validUntil: { type: [string, 'null'], format: date-time }
+
+    AgentQuotaResponse:
+      type: object
+      required:
+        [userId, usageDate, zoneId, planCode, usedModelCalls,
+         dailyModelCallLimit, remainingModelCalls, entitlementValidUntil]
+      properties:
+        userId: { type: string, format: uuid }
+        usageDate: { type: string, format: date }
+        zoneId: { type: string, enum: [Asia/Shanghai] }
+        planCode: { type: string }
+        usedModelCalls: { type: integer, minimum: 0 }
+        dailyModelCallLimit: { type: integer, minimum: 1 }
+        remainingModelCalls: { type: integer, minimum: 0 }
+        entitlementValidUntil: { type: [string, 'null'], format: date-time }
+
+    WechatLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code: { type: string, minLength: 1, maxLength: 256 }
+        displayName: { type: [string, 'null'], maxLength: 60 }
+        avatarUrl: { type: [string, 'null'], format: uri, maxLength: 1000 }
+
+    AuthSessionResponse:
+      type: object
+      required: [accessToken, expiresInSeconds, user]
+      properties:
+        accessToken: { type: string }
+        expiresInSeconds: { type: integer, minimum: 1 }
+        user: { $ref: '#/components/schemas/UserProfileResponse' }
+
+    UserStatus:
+      type: string
+      enum: [ACTIVE, DISABLED]
+
+    UserProfileResponse:
+      type: object
+      required: [userId, status, version, createdAt, updatedAt]
+      properties:
+        userId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        displayName: { type: [string, 'null'], maxLength: 80 }
+        avatarPictureId: { type: [string, 'null'], format: uuid }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    UpdateUserProfileRequest:
+      type: object
+      description: 未提供字段保留，显式 null 清空；version 为当前资料版本。
+      additionalProperties: false
+      required: [version]
+      properties:
+        displayName: { type: [string, 'null'], maxLength: 80 }
+        avatarPictureId: { type: [string, 'null'], format: uuid }
+        version: { type: integer, minimum: 1 }
+
+    VisualSourceType:
+      type: string
+      enum: [MODEL_SNAPSHOT, STANDARD_REFERENCE, USER_UPLOAD]
+
+    StandardPictureView:
+      type: string
+      enum: [PALMAR, DORSAL, SIDE]
+
+    PictureUploadStatus:
+      type: string
+      enum: [INITIATED, UPLOADED, AVAILABLE, FAILED, DELETED]
+
+    PictureProcessingStatus:
+      type: string
+      enum: [PENDING, PROCESSING, SUCCEEDED, PARTIAL, FAILED, NOT_REQUIRED]
+
+    CoordinateSpace:
+      type: string
+      enum: [NORMALIZED_0_1]
+
+    AnnotationShapeType:
+      type: string
+      enum: [POINT, CIRCLE, POLYLINE, POLYGON]
+
+    ResolveVisualReferencesRequest:
+      type: object
+      additionalProperties: false
+      required: [assessmentId, pictureIds]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        pictureIds:
+          type: array
+          maxItems: 12
+          uniqueItems: true
+          items: { type: string, format: uuid }
+
+    ResolvedVisualReference:
+      type: object
+      required: [pictureId, sourceType, annotationSetId]
+      properties:
+        pictureId: { type: string, format: uuid }
+        sourceType: { $ref: '#/components/schemas/VisualSourceType' }
+        annotationSetId: { type: [string, 'null'], format: uuid }
+
+    PictureUploadMetadata:
+      type: object
+      additionalProperties: false
+      required: [sourceType, clientRequestId]
+      properties:
+        sourceType: { $ref: '#/components/schemas/VisualSourceType' }
+        clientRequestId: { type: string, format: uuid }
+        assessmentId: { type: [string, 'null'], format: uuid }
+        viewState:
+          oneOf:
+            - $ref: '#/components/schemas/ViewState3D'
+            - type: 'null'
+        userNote: { type: [string, 'null'], maxLength: 500 }
+
+    ViewState3D:
+      type: object
+      additionalProperties: false
+      required: [modelAssetVersion, camera, target, zoom]
+      properties:
+        modelAssetVersion: { type: string, maxLength: 80 }
+        camera: { $ref: '#/components/schemas/Vector3' }
+        target: { $ref: '#/components/schemas/Vector3' }
+        up: { $ref: '#/components/schemas/Vector3' }
+        zoom: { type: number, exclusiveMinimum: 0 }
+        coarseRegionId: { type: [string, 'null'], maxLength: 100 }
+        implementationHit:
+          type: [object, 'null']
+          additionalProperties: true
+          description: 可选的 triangle/mesh/UV 调试数据，不是 AI 必须理解的业务字段。
+
+    Vector3:
+      type: object
+      additionalProperties: false
+      required: [x, y, z]
+      properties:
+        x: { type: number }
+        y: { type: number }
+        z: { type: number }
+
+    PictureResponse:
+      type: object
+      required:
+        [pictureId, ownerUserId, sourceType, mediaType, byteSize, uploadStatus,
+         processingStatus, createdAt, updatedAt]
+      properties:
+        pictureId: { type: string, format: uuid }
+        ownerUserId: { type: [string, 'null'], format: uuid, description: 系统标准图片没有用户 owner。 }
+        sourceType: { $ref: '#/components/schemas/VisualSourceType' }
+        standardAssetKey: { type: [string, 'null'], maxLength: 100 }
+        standardHandSide:
+          oneOf:
+            - $ref: '#/components/schemas/HandSide'
+            - type: 'null'
+        standardView:
+          oneOf:
+            - $ref: '#/components/schemas/StandardPictureView'
+            - type: 'null'
+        originalFilename: { type: [string, 'null'] }
+        mediaType: { type: string, examples: [image/jpeg] }
+        byteSize: { type: integer, minimum: 1 }
+        width: { type: [integer, 'null'], minimum: 1 }
+        height: { type: [integer, 'null'], minimum: 1 }
+        uploadStatus: { $ref: '#/components/schemas/PictureUploadStatus' }
+        processingStatus: { $ref: '#/components/schemas/PictureProcessingStatus' }
+        originalUrl:
+          type: [string, 'null']
+          format: uri
+          description: 短期签名 URL；不要持久化到业务表。
+        thumbnailUrl: { type: [string, 'null'], format: uri }
+        viewState:
+          oneOf:
+            - $ref: '#/components/schemas/ViewState3D'
+            - type: 'null'
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    AnnotationSetResponse:
+      type: object
+      required:
+        [annotationSetId, pictureId, coordinateSpace, sourceWidth, sourceHeight,
+         shapes, version, updatedAt]
+      properties:
+        annotationSetId: { type: string, format: uuid }
+        pictureId: { type: string, format: uuid }
+        coordinateSpace: { $ref: '#/components/schemas/CoordinateSpace' }
+        sourceWidth: { type: integer, minimum: 1 }
+        sourceHeight: { type: integer, minimum: 1 }
+        shapes:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/AnnotationShape' }
+        note: { type: [string, 'null'], maxLength: 1000 }
+        version: { type: integer, minimum: 1 }
+        updatedAt: { type: string, format: date-time }
+
+    ReplaceAnnotationSetRequest:
+      type: object
+      additionalProperties: false
+      required: [assessmentId, sourceWidth, sourceHeight, shapes, version]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        sourceWidth: { type: integer, minimum: 1 }
+        sourceHeight: { type: integer, minimum: 1 }
+        shapes:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/AnnotationShape' }
+        note: { type: [string, 'null'], maxLength: 1000 }
+        version:
+          type: integer
+          minimum: 0
+          description: 传 0 表示首次创建；已有标注集必须传当前版本。
+
+    AnnotationShape:
+      type: object
+      additionalProperties: false
+      required: [shapeId, type, geometry]
+      properties:
+        shapeId: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/AnnotationShapeType' }
+        geometry:
+          oneOf:
+            - $ref: '#/components/schemas/PointGeometry'
+            - $ref: '#/components/schemas/CircleGeometry'
+            - $ref: '#/components/schemas/PathGeometry'
+        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', default: '#E5484D' }
+        lineWidthNormalized:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 0.05
+          default: 0.006
+        label: { type: [string, 'null'], maxLength: 120 }
+
+    NormalizedPoint:
+      type: object
+      additionalProperties: false
+      required: [x, y]
+      properties:
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+
+    PointGeometry:
+      type: object
+      additionalProperties: false
+      required: [kind, point]
+      properties:
+        kind: { type: string, const: point }
+        point: { $ref: '#/components/schemas/NormalizedPoint' }
+
+    CircleGeometry:
+      type: object
+      additionalProperties: false
+      required: [kind, center, radiusX, radiusY]
+      properties:
+        kind: { type: string, const: circle }
+        center: { $ref: '#/components/schemas/NormalizedPoint' }
+        radiusX: { type: number, exclusiveMinimum: 0, maximum: 1 }
+        radiusY: { type: number, exclusiveMinimum: 0, maximum: 1 }
+
+    PathGeometry:
+      type: object
+      additionalProperties: false
+      required: [kind, points]
+      properties:
+        kind: { type: string, enum: [polyline, polygon] }
+        points:
+          type: array
+          minItems: 2
+          maxItems: 2000
+          items: { $ref: '#/components/schemas/NormalizedPoint' }
+
+    AssessmentStatus:
+      type: string
+      enum: [DRAFT, COLLECTING, CLARIFYING, COMPLETED, CANCELLED]
+
+    HandSide:
+      type: string
+      enum: [LEFT, RIGHT]
+
+    CurrentStepKey:
+      type: string
+      enum: [BASIC_INPUT, LOCATION_3D, VISUAL_ANNOTATION, AGENT, RESULT]
+
+    OnsetKind:
+      type: string
+      enum: [TODAY, DAYS_AGO, WEEKS_AGO, MONTHS_AGO, EXACT_DATE, UNKNOWN]
+
+    FingerCode:
+      type: string
+      enum: [THUMB, INDEX, MIDDLE, RING, LITTLE]
+
+    JointCode:
+      type: string
+      enum: [TIP, DIP, PIP, MCP, CMC]
+
+    RecommendationLevel:
+      type: string
+      enum: [SELF_MONITOR, ROUTINE_PROFESSIONAL, PROMPT_PROFESSIONAL, URGENT]
+
+    NormalUseImpact:
+      type: string
+      enum: [NONE, MILD, MODERATE, SEVERE, UNKNOWN]
+
+    AssessmentAnswerSource:
+      type: string
+      enum: [INITIAL_FORM, MOCK_AGENT, AI_AGENT, USER_CORRECTION]
+
+    ResultGeneratedBy:
+      type: string
+      enum: [MOCK, RULE, AI]
+
+    SymptomType:
+      type: string
+      description: |
+        用户可多选的主观症状类型：疼痛、酸痛、发胀、麻木、肿胀、无力、僵硬，
+        或其他/暂时说不清。它帮助表达，不代表医学诊断。
+      enum:
+        [PAIN, ACHING, DISTENSION, NUMBNESS, SWELLING, WEAKNESS, STIFFNESS, OTHER_UNCERTAIN]
+
+    InitialSymptomDetails:
+      type: object
+      additionalProperties: false
+      required: [handSide, onsetKind, activityContext, normalUseImpact]
+      properties:
+        handSide: { $ref: '#/components/schemas/HandSide' }
+        symptomTypes:
+          type: array
+          minItems: 1
+          maxItems: 8
+          uniqueItems: true
+          description: 可选多选；用户暂时无法判断时可选择 OTHER_UNCERTAIN。
+          examples: [[PAIN, NUMBNESS]]
+          items: { $ref: '#/components/schemas/SymptomType' }
+        onsetKind: { $ref: '#/components/schemas/OnsetKind' }
+        onsetAmount:
+          type: [integer, 'null']
+          minimum: 1
+          description: DAYS_AGO、WEEKS_AGO 或 MONTHS_AGO 时保存用户输入的原始相对数量。
+        onsetDate:
+          type: [string, 'null']
+          format: date
+          description: EXACT_DATE 时使用。
+        onsetText:
+          type: [string, 'null']
+          maxLength: 200
+          description: 用户关于开始时间的原始补充文字，用于恢复原输入。
+        activityContext:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: 哪个动作或情况下最明显。
+        normalUseImpact: { $ref: '#/components/schemas/NormalUseImpact' }
+        userNote: { type: [string, 'null'], maxLength: 2000 }
+
+    CreateAssessmentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        initialInput:
+          oneOf:
+            - $ref: '#/components/schemas/InitialSymptomDetails'
+            - type: 'null'
+
+    UpdateAssessmentBasicsRequest:
+      type: object
+      additionalProperties: false
+      required: [initialInput, version]
+      properties:
+        initialInput: { $ref: '#/components/schemas/InitialSymptomDetails' }
+        currentStepKey:
+          oneOf:
+            - $ref: '#/components/schemas/CurrentStepKey'
+            - type: 'null'
+        version: { type: integer, minimum: 1 }
+
+    SymptomLocationResponse:
+      type: object
+      required: [locationId, handSide, regionId, displayLabel, selectedAt]
+      properties:
+        locationId: { type: string, format: uuid }
+        handSide: { $ref: '#/components/schemas/HandSide' }
+        regionId:
+          type: string
+          pattern: '^hand\.(left|right)\.[a-z0-9.-]+$'
+          examples: [hand.right.middle.pip]
+        displayLabel: { type: string, examples: [右手 · 中指 · PIP 附近] }
+        fingerCode:
+          oneOf:
+            - $ref: '#/components/schemas/FingerCode'
+            - type: 'null'
+        jointCode:
+          oneOf:
+            - $ref: '#/components/schemas/JointCode'
+            - type: 'null'
+        detailNote: { type: [string, 'null'], maxLength: 500 }
+        selectedAt: { type: string, format: date-time }
+
+    SymptomLocationInput:
+      type: object
+      additionalProperties: false
+      required: [handSide, regionId, displayLabel]
+      properties:
+        handSide: { $ref: '#/components/schemas/HandSide' }
+        regionId: { type: string, pattern: '^hand\.(left|right)\.[a-z0-9.-]+$' }
+        displayLabel: { type: string, maxLength: 120 }
+        fingerCode:
+          oneOf:
+            - $ref: '#/components/schemas/FingerCode'
+            - type: 'null'
+        jointCode:
+          oneOf:
+            - $ref: '#/components/schemas/JointCode'
+            - type: 'null'
+        detailNote: { type: [string, 'null'], maxLength: 500 }
+
+    ReplaceSymptomLocationsRequest:
+      type: object
+      additionalProperties: false
+      required: [symptomLocations]
+      properties:
+        symptomLocations:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/SymptomLocationInput' }
+
+    ReplaceVisualReferencesRequest:
+      type: object
+      additionalProperties: false
+      required: [pictureIds, version]
+      properties:
+        pictureIds:
+          type: array
+          maxItems: 12
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        version:
+          type: integer
+          minimum: 1
+
+    VisualReference:
+      type: object
+      required: [pictureId, sourceType, sortOrder]
+      properties:
+        pictureId: { type: string, format: uuid }
+        sourceType: { $ref: '#/components/schemas/VisualSourceType' }
+        annotationSetId: { type: [string, 'null'], format: uuid }
+        sortOrder: { type: integer, minimum: 0 }
+
+    AssessmentAnswerResponse:
+      type: object
+      required: [answerId, clientAnswerId, sequenceNumber, questionKey, answer, source, createdAt]
+      properties:
+        answerId: { type: string, format: uuid }
+        clientAnswerId: { type: string, format: uuid }
+        sequenceNumber: { type: integer, minimum: 1 }
+        questionKey: { type: string }
+        questionText: { type: [string, 'null'] }
+        answer: { type: [object, array, string, number, boolean] }
+        source: { $ref: '#/components/schemas/AssessmentAnswerSource' }
+        createdAt: { type: string, format: date-time }
+
+    AppendAssessmentAnswerRequest:
+      type: object
+      additionalProperties: false
+      required: [clientAnswerId, sequenceNumber, questionKey, answer, source]
+      properties:
+        clientAnswerId: { type: string, format: uuid }
+        sequenceNumber: { type: integer, minimum: 1 }
+        questionKey:
+          type: string
+          pattern: '^[a-z][a-z0-9_.-]{1,79}$'
+        questionText: { type: [string, 'null'], maxLength: 500 }
+        answer: { type: [object, array, string, number, boolean] }
+        source: { $ref: '#/components/schemas/AssessmentAnswerSource' }
+
+    SubmitAssessmentRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+          description: 客户端最后读取到的 Assessment.version，用于提交状态转换的乐观并发控制。
+
+    AssessmentResponse:
+      type: object
+      required:
+        [assessmentId, userId, status, symptomLocations, visualReferences, answers,
+         currentStepKey, version, createdAt, updatedAt]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/AssessmentStatus' }
+        initialInput:
+          oneOf:
+            - $ref: '#/components/schemas/InitialSymptomDetails'
+            - type: 'null'
+        symptomLocations:
+          type: array
+          items: { $ref: '#/components/schemas/SymptomLocationResponse' }
+        visualReferences:
+          type: array
+          items: { $ref: '#/components/schemas/VisualReference' }
+        answers:
+          type: array
+          items: { $ref: '#/components/schemas/AssessmentAnswerResponse' }
+        currentStepKey: { $ref: '#/components/schemas/CurrentStepKey' }
+        version: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+
+    AssessmentSummary:
+      type: object
+      required: [assessmentId, status, updatedAt]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/AssessmentStatus' }
+        handSide:
+          oneOf:
+            - $ref: '#/components/schemas/HandSide'
+            - type: 'null'
+        locationLabel: { type: [string, 'null'] }
+        activityContext: { type: [string, 'null'] }
+        recommendationLevel:
+          oneOf:
+            - $ref: '#/components/schemas/RecommendationLevel'
+            - type: 'null'
+        updatedAt: { type: string, format: date-time }
+
+    AssessmentPageResponse:
+      type: object
+      required: [items, hasMore]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AssessmentSummary' }
+        nextCursor: { type: [string, 'null'] }
+        hasMore: { type: boolean }
+
+    AssessmentResumeResponse:
+      type: object
+      required: [assessment, currentStepKey]
+      properties:
+        assessment: { $ref: '#/components/schemas/AssessmentResponse' }
+        currentStepKey: { $ref: '#/components/schemas/CurrentStepKey' }
+        activeAgentSessionId: { type: [string, 'null'], format: uuid }
+
+    AssessmentResultResponse:
+      type: object
+      required:
+        [assessmentId, recommendationLevel, summary, reasons, suggestedNextActions,
+         warningSigns, safetyNotice, generatedBy, finalizedAt]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        recommendationLevel: { $ref: '#/components/schemas/RecommendationLevel' }
+        summary: { type: string, maxLength: 2000 }
+        reasons:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 500 }
+        suggestedNextActions:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 500 }
+        warningSigns:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 500 }
+        safetyNotice:
+          type: string
+          description: 必须明确“不是医学诊断”；紧急信号应提示及时寻求专业帮助。
+        generatedBy: { $ref: '#/components/schemas/ResultGeneratedBy' }
+        finalizedAt: { type: string, format: date-time }
+
+    ResolveAgentPicturesRequest:
+      type: object
+      additionalProperties: false
+      required: [assessmentId, pictureIds]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        pictureIds:
+          type: array
+          maxItems: 12
+          uniqueItems: true
+          items: { type: string, format: uuid }
+
+    ResolvedAgentPicture:
+      type: object
+      required: [pictureId, sourceType, mediaType, width, height, viewState, annotation, originalUrl]
+      properties:
+        pictureId: { type: string, format: uuid }
+        sourceType: { $ref: '#/components/schemas/VisualSourceType' }
+        mediaType: { type: string }
+        width: { type: integer, minimum: 1 }
+        height: { type: integer, minimum: 1 }
+        viewState:
+          oneOf:
+            - $ref: '#/components/schemas/ViewState3D'
+            - type: 'null'
+        annotation:
+          oneOf:
+            - $ref: '#/components/schemas/AnnotationSetResponse'
+            - type: 'null'
+        originalUrl:
+          type: string
+          format: uri
+          description: 临时 GET 签名，禁止作为持久化图片身份或写入 AI 输入快照。
+
+    AgentAssessmentInputResponse:
+      type: object
+      required: [assessmentId, userId, assessmentVersion, submittedAt, assessmentInputFingerprint, assessment]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        userId: { type: string, format: uuid }
+        assessmentVersion: { type: integer, minimum: 1 }
+        submittedAt: { type: string, format: date-time }
+        assessmentInputFingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        assessment: { $ref: '#/components/schemas/AssessmentResponse' }
+
+    FinalizeAgentResultRequest:
+      type: object
+      additionalProperties: false
+      required:
+        [sessionId, stepId, checkpointId, attemptNo, recommendationLevel, summary, reasons,
+         suggestedNextActions, warningSigns, safetyNotice, finalizedAt, workflowVersion,
+         generatedBy, assessmentInputFingerprint]
+      properties:
+        sessionId: { type: string, format: uuid }
+        stepId: { type: string, format: uuid }
+        checkpointId: { type: string, format: uuid }
+        attemptNo: { type: integer, minimum: 1 }
+        recommendationLevel: { $ref: '#/components/schemas/RecommendationLevel' }
+        summary: { type: string, minLength: 1, maxLength: 2000 }
+        reasons:
+          type: array
+          maxItems: 20
+          items: { type: string, minLength: 1, maxLength: 500 }
+        suggestedNextActions:
+          type: array
+          maxItems: 20
+          items: { type: string, minLength: 1, maxLength: 500 }
+        warningSigns:
+          type: array
+          maxItems: 20
+          items: { type: string, minLength: 1, maxLength: 500 }
+        safetyNotice: { type: string, minLength: 1, maxLength: 1000 }
+        finalizedAt: { type: string, format: date-time }
+        workflowVersion: { type: string, minLength: 1, maxLength: 120 }
+        generatedBy: { type: string, enum: [MOCK, AI] }
+        assessmentInputFingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+
+    FinalizedAgentResultResponse:
+      type: object
+      required: [resultId, revisionNo, finalizedAt]
+      properties:
+        resultId: { type: string, format: uuid }
+        revisionNo: { type: integer, minimum: 1 }
+        finalizedAt: { type: string, format: date-time }
+
+    CreateAgentSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [assessmentId]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        preferredLocale: { type: [string, 'null'], default: zh-CN, maxLength: 20 }
+        modelProvider: { type: [string, 'null'], maxLength: 80 }
+        modelName: { type: [string, 'null'], maxLength: 120 }
+        sourceSessionId: { type: [string, 'null'], format: uuid }
+        sourceCheckpointId: { type: [string, 'null'], format: uuid }
+
+    AgentVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion]
+      properties:
+        expectedVersion: { type: integer, format: int64, minimum: 1 }
+
+    ReviseAgentAnswerRequest:
+      type: object
+      additionalProperties: false
+      required: [answerStepId, answer, expectedVersion]
+      properties:
+        answerStepId: { type: string, format: uuid }
+        answer: {}
+        expectedVersion: { type: integer, format: int64, minimum: 1 }
+
+    ChangeAgentModelRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedVersion, provider, model]
+      properties:
+        expectedVersion: { type: integer, format: int64, minimum: 1 }
+        provider: { type: string, minLength: 1 }
+        model: { type: string, minLength: 1 }
+
+    AgentSessionStatus:
+      type: string
+      enum: [CREATED, RUNNING, WAITING_FOR_USER, PAUSED, COMPLETED, FAILED, CANCELLED]
+
+    AgentBehavior:
+      type: string
+      enum: [NARROW_DOWN, CLARIFY_CONTRADICTION, PRODUCE_RESULT]
+
+    AgentAnswerType:
+      type: string
+      enum: [SINGLE_CHOICE, MULTI_CHOICE, BOOLEAN, TEXT]
+
+    AgentStepType:
+      type: string
+      enum:
+        [USER_INPUT, EXTRACT_INFORMATION, NARROW_DOWN, DETECT_CONTRADICTION,
+         REQUEST_CONFIRMATION, OUTPUT_RESULT]
+
+    AgentQuestionOption:
+      type: object
+      required: [value, label]
+      properties:
+        value: { type: string }
+        label: { type: string }
+
+    AgentQuestion:
+      type: object
+      required: [questionId, questionKey, prompt, answerType, required]
+      properties:
+        questionId: { type: string, format: uuid }
+        questionKey: { type: string }
+        prompt: { type: string }
+        helpText: { type: [string, 'null'] }
+        answerType: { $ref: '#/components/schemas/AgentAnswerType' }
+        options:
+          type: array
+          items: { $ref: '#/components/schemas/AgentQuestionOption' }
+        required: { type: boolean }
+
+    AgentSessionResponse:
+      type: object
+      required:
+        [sessionId, assessmentId, status, currentStepNumber, recentSteps, updatedAt,
+         version, activeCheckpointId, modelProvider, modelName, totalModelCalls, maxModelCalls, maxSteps]
+      properties:
+        sessionId: { type: string, format: uuid }
+        assessmentId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/AgentSessionStatus' }
+        currentStepNumber: { type: integer, minimum: 0 }
+        behavior:
+          oneOf:
+            - $ref: '#/components/schemas/AgentBehavior'
+            - type: 'null'
+        question:
+          oneOf:
+            - $ref: '#/components/schemas/AgentQuestion'
+            - type: 'null'
+        recentSteps:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/AgentStepSummary' }
+        terminationReason: { type: [string, 'null'] }
+        updatedAt: { type: string, format: date-time }
+
+        version: { type: integer, format: int64, minimum: 1 }
+        activeCheckpointId: { type: string, format: uuid }
+        modelProvider: { type: string }
+        modelName: { type: string }
+        totalModelCalls: { type: integer, minimum: 0 }
+        maxModelCalls: { type: integer, minimum: 1 }
+        maxSteps: { type: integer, minimum: 1 }
+
+    AgentStepSummary:
+      type: object
+      required: [stepNumber, stepType, message, createdAt, stepId, parentStepId, status]
+      properties:
+        stepNumber: { type: integer, minimum: 1 }
+        stepType: { $ref: '#/components/schemas/AgentStepType' }
+        message: { type: string }
+        createdAt: { type: string, format: date-time }
+        stepId: { type: string, format: uuid }
+        parentStepId: { type: [string, 'null'], format: uuid }
+        status:
+          type: string
+          enum: [STARTED, WAITING, COMPLETED, FAILED, DISCARDED]
+
+    AnswerAgentQuestionRequest:
+      type: object
+      additionalProperties: false
+      required: [questionId, answer, expectedVersion, baseCheckpointId]
+      properties:
+        questionId: { type: string, format: uuid }
+        answer: {}
+        expectedStepNumber: { type: [integer, 'null'], minimum: 0 }
+        expectedVersion: { type: integer, format: int64, minimum: 1 }
+        baseCheckpointId: { type: string, format: uuid }
+
+    AgentFinalizationResponse:
+      type: object
+      required: [assessmentId, sessionId, resultId, revisionNo, finalizedAt]
+      properties:
+        assessmentId: { type: string, format: uuid }
+        sessionId: { type: string, format: uuid }
+        resultId: { type: string, format: uuid }
+        revisionNo: { type: integer, minimum: 1 }
+        finalizedAt: { type: string, format: date-time }
+
+    AgentOutcomeResponse:
+      type: object
+      required:
+        [sessionId, assessmentId, recommendationLevel, summary, reasons,
+         suggestedNextActions, warningSigns, safetyNotice, finalizedAt]
+      properties:
+        sessionId: { type: string, format: uuid }
+        assessmentId: { type: string, format: uuid }
+        recommendationLevel: { $ref: '#/components/schemas/RecommendationLevel' }
+        summary: { type: string }
+        reasons: { type: array, items: { type: string } }
+        suggestedNextActions: { type: array, items: { type: string } }
+        warningSigns: { type: array, items: { type: string } }
+        safetyNotice: { type: string }
+        finalizedAt: { type: string, format: date-time }
+        uncertaintyNote: { type: [string, 'null'] }
+
+    Problem:
+      type: object
+      required: [type, title, status, code, traceId]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        code: { type: string, examples: [ASSESSMENT_VERSION_CONFLICT] }
+        detail: { type: [string, 'null'] }
+        instance: { type: [string, 'null'], format: uri-reference }
+        traceId: { type: string }
+        fieldErrors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
