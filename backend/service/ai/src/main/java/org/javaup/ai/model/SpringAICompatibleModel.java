@@ -23,6 +23,9 @@ import org.javaup.ai.observability.AgentTelemetry;
 import org.javaup.ai.rag.KnowledgeRetrievalService;
 import org.javaup.ai.rag.KnowledgeSearchReport;
 import org.javaup.ai.search.SearchTool;
+import org.javaup.ai.review.ReviewIssue;
+import org.javaup.ai.review.ReviewResult;
+import org.javaup.ai.review.ReviewVerdict;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.Usage;
@@ -40,6 +43,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.util.MimeTypeUtils;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.DeserializationFeature;
 
 /**
  * 识图、资料检索、单次模型请求、结果校验的适配实现。
@@ -55,6 +60,8 @@ public class SpringAICompatibleModel {
     private final ObservationRegistry observationRegistry;
     private final KnowledgeRetrievalService knowledge;
     private final String systemInstruction;
+    private final String reviewInstruction;
+    private final String correctionInstruction;
     private final Map<String, ChatModel> clients = new ConcurrentHashMap<>();
 
     @Autowired
@@ -77,6 +84,10 @@ public class SpringAICompatibleModel {
             this.systemInstruction =
                     new ClassPathResource("prompts/symptom-agent.md")
                             .getContentAsString(StandardCharsets.UTF_8);
+            this.reviewInstruction = new ClassPathResource("prompts/symptom-review.md")
+                    .getContentAsString(StandardCharsets.UTF_8);
+            this.correctionInstruction = new ClassPathResource("prompts/symptom-correction.md")
+                    .getContentAsString(StandardCharsets.UTF_8);
         } catch (IOException failure) {
             throw new IllegalStateException("Cannot load symptom-agent prompt resource", failure);
         }
@@ -122,7 +133,6 @@ public class SpringAICompatibleModel {
 
             return result;
         });
-        BeanOutputConverter<AgentDecision> converter = new BeanOutputConverter<>(AgentDecision.class);
         String body = mapper.writeValueAsString(Map.of(
                 "locale", request.locale(),
                 "initialInput", request.inputSnapshot(),
@@ -134,6 +144,127 @@ public class SpringAICompatibleModel {
                         "references", knowledgeSources(knowledgeReport)),
                 "search", report));
 
+        return decision(
+                request, profile, body, systemInstruction,
+                verifiedSources(report, knowledgeReport), false, "model_request");
+    }
+
+    /** Exactly one correction, using the frozen source catalogue; retrieval is not repeated. */
+    public AgentModelResult revise(
+            AgentModelRequest request,
+            AgentDecision candidate,
+            List<ReviewIssue> issues,
+            AgentModelProperties.Profile profile
+    ) {
+        requireFinalCandidate(candidate);
+        if (issues == null || issues.isEmpty() || issues.size() > 5) {
+            throw invalidReviewOutput();
+        }
+        String body = mapper.writeValueAsString(Map.of(
+                "locale", request.locale(),
+                "initialInput", request.inputSnapshot(),
+                "currentState", request.state(),
+                "activeBranch", request.history(),
+                "candidate", candidate,
+                "reviewIssues", issues,
+                "verifiedReferences", references(candidate)));
+        return decision(
+                request,
+                profile,
+                body,
+                systemInstruction + "\n" + correctionInstruction,
+                references(candidate),
+                true,
+                "revision_model_request");
+    }
+
+    /** Reviewer sees the same input and photographs, not only the primary model's summary. */
+    public ReviewResult review(
+            AgentModelRequest request,
+            AgentDecision candidate,
+            AgentModelProperties.Profile profile
+    ) {
+        requireFinalCandidate(candidate);
+        BeanOutputConverter<ReviewDecision> converter = new BeanOutputConverter<>(ReviewDecision.class);
+        String body = mapper.writeValueAsString(Map.of(
+                "locale", request.locale(),
+                "initialInput", request.inputSnapshot(),
+                "currentState", request.state(),
+                "activeBranch", request.history(),
+                "candidate", candidate,
+                "verifiedReferences", references(candidate)));
+        ChatResponse response = call(
+                request, profile, body, reviewInstruction + "\n" + converter.getFormat(), "review_model_request");
+        ResponseUsage usage = recordUsage(profile, response);
+        ReviewDecision decision = telemetry.observe("review_output_validation", () -> {
+            try {
+                String raw = outputText(response);
+                if (raw.length() > 10_000) {
+                    throw invalidReviewOutput();
+                }
+                JsonNode node = mapper.readerFor(JsonNode.class)
+                        .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                        .with(DeserializationFeature.FAIL_ON_READING_DUP_TREE_KEY)
+                        .readValue(raw);
+                if (!node.isObject() || node.size() != 2 || !node.has("verdict") || !node.has("issues")
+                        || !node.path("verdict").isTextual() || !node.path("issues").isArray()) {
+                    throw invalidReviewOutput();
+                }
+                for (var issue : node.path("issues")) {
+                    if (!issue.isObject() || issue.size() != 2 || !issue.path("code").isTextual()
+                            || !issue.path("reason").isTextual()) {
+                        throw invalidReviewOutput();
+                    }
+                }
+                ReviewDecision parsed = converter.convert(raw);
+                validateReview(parsed);
+                return parsed;
+            } catch (RuntimeException invalid) {
+                throw invalidReviewOutput();
+            }
+        });
+        return new ReviewResult(
+                decision.verdict(), decision.issues(), usage.id(),
+                usage.input(), usage.output(), usage.total());
+    }
+
+    private AgentModelResult decision(
+            AgentModelRequest request,
+            AgentModelProperties.Profile profile,
+            String body,
+            String instruction,
+            List<AgentDecision.Reference> verifiedSources,
+            boolean finalOnly,
+            String stage
+    ) {
+        BeanOutputConverter<AgentDecision> converter = new BeanOutputConverter<>(AgentDecision.class);
+        ChatResponse response = call(request, profile, body, instruction + "\n" + converter.getFormat(), stage);
+        ResponseUsage usage = recordUsage(profile, response);
+        AgentDecision decision = telemetry.observe("output_validation", () -> {
+            try {
+                AgentDecision parsed = validate(converter.convert(outputText(response)), verifiedSources);
+                if (finalOnly && parsed.behavior() != AgentBehavior.PRODUCE_RESULT) {
+                    throw new ApiException(HttpStatus.BAD_GATEWAY,
+                            INVALID_MODEL_REVISION, "The correction did not return a final candidate.");
+                }
+                return parsed;
+            } catch (ApiException failure) {
+                throw failure;
+            } catch (RuntimeException malformed) {
+                throw invalidOutput();
+            }
+        });
+        return new AgentModelResult(
+                decision, usage.id(), usage.input(), usage.output(), usage.total());
+    }
+
+    private ChatResponse call(
+            AgentModelRequest request,
+            AgentModelProperties.Profile profile,
+            String body,
+            String instruction,
+            String stage
+    ) {
         if (body.length() > properties.getMaxInputChars()) {
             throw new ApiException(
                     HttpStatus.UNPROCESSABLE_ENTITY,
@@ -145,52 +276,76 @@ public class SpringAICompatibleModel {
                 .text(body)
                 .media(telemetry.observe("image_download", () -> loadPictures(request.pictures())))
                 .build();
-        String instruction = systemInstruction + "\n" + converter.getFormat();
-        ChatResponse response = telemetry.observe(
-                "model_request",
-                Map.of("provider", request.provider(), "model", profile.getModel()),
+        return telemetry.observe(
+                stage,
+                Map.of("provider", profile.getProvider(), "model", profile.getModel()),
                 () -> {
                     try {
-                        return model(request.provider(), profile)
+                        return model(profile.getProvider(), profile)
                                 .call(new Prompt(List.of(new SystemMessage(instruction), user)));
                     } catch (RuntimeException failure) {
                         throw new ApiException(
                                 HttpStatus.BAD_GATEWAY,
-                                MODEL_CALL_FAILED,
+                                "review_model_request".equals(stage) ? QUALITY_REVIEW_CALL_FAILED : MODEL_CALL_FAILED,
                                 "The selected model request failed; no result was accepted.");
                     }
                 });
+    }
 
+    private ResponseUsage recordUsage(AgentModelProperties.Profile profile, ChatResponse response) {
         Usage usage = response == null || response.getMetadata() == null
                 ? null : response.getMetadata().getUsage();
         Integer inputTokens = usage == null ? null : usage.getPromptTokens();
         Integer outputTokens = usage == null ? null : usage.getCompletionTokens();
         Integer totalTokens = usage == null ? null : usage.getTotalTokens();
         // 输出校验失败也可能已经消耗token；在业务结果校验前记录平台提供的用量。
-        telemetry.recordTokens(request.provider(), profile.getModel(), inputTokens, outputTokens);
-        AgentDecision decision = telemetry.observe("output_validation", () -> {
-            if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
-                throw invalidOutput();
-            }
-
-            try {
-                return validate(
-                        converter.convert(Objects.requireNonNull(response.getResult().getOutput().getText())),
-                        verifiedSources(report, knowledgeReport));
-            } catch (ApiException failure) {
-                throw failure;
-            } catch (RuntimeException malformed) {
-                throw invalidOutput();
-            }
-        });
-
-        return new AgentModelResult(
-                decision,
-                response.getMetadata().getId(),
-                inputTokens,
-                outputTokens,
-                totalTokens);
+        telemetry.recordTokens(profile.getProvider(), profile.getModel(), inputTokens, outputTokens);
+        return new ResponseUsage(
+                response == null || response.getMetadata() == null ? null : response.getMetadata().getId(),
+                inputTokens, outputTokens, totalTokens);
     }
+
+    private static String outputText(ChatResponse response) {
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null
+                || response.getResult().getOutput().getText() == null) {
+            throw invalidOutput();
+        }
+        return response.getResult().getOutput().getText();
+    }
+
+    private static List<AgentDecision.Reference> references(AgentDecision candidate) {
+        return candidate.references() == null ? List.of() : List.copyOf(candidate.references());
+    }
+
+    private static void requireFinalCandidate(AgentDecision candidate) {
+        if (candidate == null || candidate.behavior() != AgentBehavior.PRODUCE_RESULT || candidate.outcome() == null) {
+            throw new ApiException(HttpStatus.BAD_REQUEST,
+                    INVALID_REVIEW_CANDIDATE, "Only a final result candidate can be reviewed or corrected.");
+        }
+    }
+
+    private static void validateReview(ReviewDecision decision) {
+        if (decision == null || decision.verdict() == null || decision.issues() == null || decision.issues().size() > 5
+                || (decision.verdict() == ReviewVerdict.ACCEPT) != decision.issues().isEmpty()) {
+            throw invalidReviewOutput();
+        }
+        Set<org.javaup.ai.review.ReviewIssueCode> codes = new HashSet<>();
+        for (ReviewIssue issue : decision.issues()) {
+            if (issue == null || issue.code() == null || issue.reason() == null || issue.reason().isBlank()
+                    || issue.reason().length() > 500 || !codes.add(issue.code())) {
+                throw invalidReviewOutput();
+            }
+        }
+    }
+
+    private static ApiException invalidReviewOutput() {
+        return new ApiException(HttpStatus.BAD_GATEWAY,
+                INVALID_QUALITY_REVIEW_OUTPUT, "The reviewer did not return a valid bounded review decision.");
+    }
+
+    public record ReviewDecision(ReviewVerdict verdict, List<ReviewIssue> issues) {}
+
+    private record ResponseUsage(String id, Integer input, Integer output, Integer total) {}
 
     /** 来源来自实际工具响应；知识资料没有公网 URL 时仍保留文档和片段 ID。 */
     private List<AgentDecision.Reference> verifiedSources(

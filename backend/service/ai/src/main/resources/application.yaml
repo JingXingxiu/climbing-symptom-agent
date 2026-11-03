@@ -19,6 +19,7 @@ spring:
   config:
     import:
       - "optional:classpath:rag-defaults.yaml"
+      - "optional:classpath:review-defaults.yaml"
       - "nacos:${spring.application.name}-dev.yaml?group=CLIMBING_DEV&refreshEnabled=false"
       # 本机密钥文件不进 Git、不打入 JAR；兼容从模块、backend 或项目根目录启动。
       - "optional:file:./ai-service.local.properties"

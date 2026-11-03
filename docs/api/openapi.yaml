@@ -2243,7 +2243,7 @@ components:
           type: array
           items:
             type: object
-            required: [callId, callNumber, executionGeneration, provider, model, status, startedAt]
+            required: [callId, callNumber, executionGeneration, provider, model, purpose, status, reviewIssueCodes, startedAt]
             properties:
               callId: { type: string, format: uuid }
               stepId: { type: [string, 'null'], format: uuid }
@@ -2252,7 +2252,26 @@ components:
               executionGeneration: { type: integer, format: int64, minimum: 0 }
               provider: { type: string }
               model: { type: string }
-              status: { type: string, enum: [STARTED, SUCCEEDED, FAILED, DISCARDED] }
+              purpose:
+                type: string
+                enum: [NEXT_SYMPTOM_STEP, QUALITY_REVIEW, RESULT_REVISION]
+                description: 推进分析、独立模型评审或一次性结果纠正；每次实际模型调用独立记账。
+              status:
+                type: string
+                enum: [STARTED, SUCCEEDED, FAILED, DISCARDED]
+                description: SUCCEEDED只表示单次合法返回，不表示候选已被评审采纳或交付History；DISCARDED用于过期执行。
+              reviewVerdict:
+                type: [string, 'null']
+                enum: [ACCEPT, REVISE, ABSTAIN, null]
+                description: 从安全元数据白名单读取的评审结论；非评审、尚未返回或旧调用可为空。
+              reviewIssueCodes:
+                type: array
+                maxItems: 5
+                uniqueItems: true
+                description: 仅返回固定问题代码，不包含B的reason、Prompt或用户原文；非评审调用为空数组。
+                items:
+                  type: string
+                  enum: [INPUT_MISMATCH, UNRESOLVED_CONTRADICTION, UNSUPPORTED_CLAIM, UNSAFE_ADVICE, MISSING_UNCERTAINTY, VISUAL_MISMATCH, OTHER]
               traceId: { type: [string, 'null'], description: 旧记录可为空，新执行为32位十六进制Trace ID }
               executionLatencyMs: { type: [integer, 'null'], minimum: 0 }
               inputTokens: { type: [integer, 'null'], minimum: 0 }

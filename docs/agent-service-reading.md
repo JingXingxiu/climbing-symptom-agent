@@ -82,6 +82,8 @@ History 的 `AgentResultServiceImpl` 可以接着按 `getAgentInput → finalize
 
 ## 当前运行条件
 
+最终结果可以开启独立 B 模型评审。普通追问仍走原有流程；候选结果经校验后评审，最多一次 A 纠正和 B 复审。所有额外调用计入现有预算，失败不伪造成通过。配置、评审代码与合成案例入口见 [模型评审阅读说明](agent-review.md)。先读 `advanceSession` 的分支与预占，再读 `ReviewClient` 和纠正入口；不要把两模型通过当作医学正确性的证明。
+
 - Nacos 的 `ai-service-dev.yaml` 已提供 AI 数据源、模型 profile 与搜索配置；默认选择智谱 `zhipu/glm-4.6v-flash`。本机密钥由模块外部文件 `ai-service.local.properties` 导入，不提交 Git，也不打入 JAR，配置方式见 AI 模块 README。
 - `FakeAgentModel` 已移到 `src/test/java`，仅用于离线测试，不再是正式模型选项，也不作为失败兜底；真实运行缺少配置或调用失败会明确报错。
 - 真正启用持久化前，需要人工审查并执行 AI V001/V002 与 History V003/V004；V004 保存结果来源快照。没有自动迁移或启动 Docker。AI SQL 暂时保留原 future 路径，不代表启动会替你建表。

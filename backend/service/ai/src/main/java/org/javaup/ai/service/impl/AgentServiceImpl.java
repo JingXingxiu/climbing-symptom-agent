@@ -21,6 +21,7 @@ import org.javaup.ai.api.dto.AgentEnums.AgentStepType;
 import org.javaup.ai.api.dto.AgentEnums.AgentTerminationReason;
 import org.javaup.ai.api.dto.AgentEnums.ModelCallErrorCategory;
 import org.javaup.ai.api.dto.AgentEnums.ModelCallStatus;
+import org.javaup.ai.api.dto.AgentEnums.ModelCallPurpose;
 import org.javaup.ai.api.dto.AgentEnums.ResultGeneratedBy;
 import org.javaup.ai.api.dto.AgentFinalizationResponse;
 import org.javaup.ai.api.dto.AgentOutcomeResponse;
@@ -50,6 +51,10 @@ import org.javaup.ai.model.AgentModelClient;
 import org.javaup.ai.model.AgentModelRequest;
 import org.javaup.ai.model.AgentModelResult;
 import org.javaup.ai.observability.AgentTelemetry;
+import org.javaup.ai.review.ReviewClient;
+import org.javaup.ai.review.ReviewProperties;
+import org.javaup.ai.review.ReviewResult;
+import org.javaup.ai.review.ReviewVerdict;
 import org.javaup.ai.service.AgentAssessmentBridge;
 import org.javaup.ai.service.AgentJson;
 import org.javaup.ai.service.AgentQuotaService;
@@ -84,6 +89,8 @@ public class AgentServiceImpl implements AgentService {
     private final AgentJson json;
     private final Clock clock;
     private final AgentTelemetry telemetry;
+    private final ReviewClient reviewer;
+    private final ReviewProperties reviewSettings;
 
     public AgentServiceImpl(
             AgentSessionMapper sessions,
@@ -97,7 +104,9 @@ public class AgentServiceImpl implements AgentService {
             AgentWorkflowProperties settings,
             AgentJson json,
             Clock clock,
-            AgentTelemetry telemetry
+            AgentTelemetry telemetry,
+            ReviewClient reviewer,
+            ReviewProperties reviewSettings
     ) {
         this.sessions = sessions;
         this.steps = steps;
@@ -111,6 +120,8 @@ public class AgentServiceImpl implements AgentService {
         this.json = json;
         this.clock = clock;
         this.telemetry = telemetry;
+        this.reviewer = reviewer;
+        this.reviewSettings = reviewSettings;
     }
 
     @Override
@@ -400,6 +411,7 @@ public class AgentServiceImpl implements AgentService {
                         tx -> reserveExecution(userId, sessionId, expected, entitlement)));
         long started = System.nanoTime();
         AgentModelResult result;
+        AgentModelRequest modelRequest;
 
         try {
             List<AgentModelRequest.Picture> pictures =
@@ -409,17 +421,16 @@ public class AgentServiceImpl implements AgentService {
                     "remainingModelCalls",
                     execution.session().getMaxModelCalls()
                             - execution.session().getTotalModelCalls());
-            result =
-                    modelClient.analyze(
-                            new AgentModelRequest(
-                                    sessionId,
-                                    execution.session().getModelProvider(),
-                                    execution.session().getModelName(),
-                                    execution.session().getPreferredLocale(),
-                                    execution.input(),
-                                    modelState,
-                                    execution.history(),
-                                    pictures));
+            modelRequest = new AgentModelRequest(
+                    sessionId,
+                    execution.session().getModelProvider(),
+                    execution.session().getModelName(),
+                    execution.session().getPreferredLocale(),
+                    execution.input(),
+                    modelState,
+                    execution.history(),
+                    pictures);
+            result = modelClient.analyze(modelRequest);
             validateDecision(result == null ? null : result.decision());
         } catch (RuntimeException failure) {
             transaction.executeWithoutResult(
@@ -436,6 +447,10 @@ public class AgentServiceImpl implements AgentService {
                     "The analysis step failed; its saved state can be resumed");
         }
 
+        if (reviewSettings.isEnabled() && result.decision().behavior() == AgentBehavior.PRODUCE_RESULT) {
+            return reviewCandidate(userId, entitlement, execution, modelRequest, result, started);
+        }
+
         AgentModelResult completed = result;
 
         AgentSessionResponse response = telemetry.observe(
@@ -448,6 +463,222 @@ public class AgentServiceImpl implements AgentService {
         }
 
         return response;
+    }
+
+    /** 最多 A→B→A'→B'；每次远程调用独立预占、落账，候选通过前不推进 Checkpoint。 */
+    private AgentSessionResponse reviewCandidate(
+            UUID userId,
+            EntitlementResponse entitlement,
+            Execution original,
+            AgentModelRequest request,
+            AgentModelResult firstCandidate,
+            long firstStarted
+    ) {
+        Execution active = original;
+        Execution candidateExecution = original;
+        AgentModelResult candidate = firstCandidate;
+        long started = firstStarted;
+
+        try {
+            for (int revision = 0; revision <= 1; revision++) {
+                ObjectNode candidateMetadata = json.object();
+                candidateMetadata.put("revision", revision);
+                candidateMetadata.put("qualityReview", "PENDING");
+                boolean live = finishCall(userId, candidateExecution,
+                        candidate.providerRequestId(), candidate.inputTokens(), candidate.outputTokens(),
+                        candidate.totalTokens(), elapsed(started), candidateMetadata);
+                if (!live) {
+                    return savedResponse(userId, request.sessionId());
+                }
+
+                ObjectNode reviewMetadata = json.object();
+                reviewMetadata.put("reviewedCallId", candidateExecution.call().getId().toString());
+                reviewMetadata.put("revision", revision);
+                Execution reviewExecution = reserveAdditionalCall(userId, entitlement, candidateExecution,
+                        ModelCallPurpose.QUALITY_REVIEW, reviewSettings.getProvider(), reviewSettings.getModel(),
+                        candidate.decision(), reviewMetadata);
+                if (reviewExecution == null) {
+                    return savedResponse(userId, request.sessionId());
+                }
+                active = reviewExecution;
+                started = System.nanoTime();
+                AgentDecision draft = candidate.decision();
+                AgentModelRequest reviewRequest = requestForCall(request, active);
+                ReviewResult review = telemetry.observe("quality_review", () -> reviewer.review(reviewRequest, draft));
+                validateReview(review);
+                reviewMetadata.put("verdict", review.verdict().name());
+                reviewMetadata.set("issueCodes", json.node(review.issues().stream()
+                        .map(issue -> issue.code().name()).toList()));
+                live = finishCall(userId, active,
+                        review.providerRequestId(), review.inputTokens(), review.outputTokens(),
+                        review.totalTokens(), elapsed(started), reviewMetadata);
+                if (!live) {
+                    return savedResponse(userId, request.sessionId());
+                }
+                telemetry.recordReviewVerdict(review.verdict().name());
+
+                if (review.verdict() == ReviewVerdict.ACCEPT) {
+                    return commitReviewedCandidate(userId, candidateExecution, candidate, active.call(), review, revision);
+                }
+                if (review.verdict() == ReviewVerdict.ABSTAIN || revision == 1) {
+                    AgentModelResult fallback = new AgentModelResult(
+                            requestMoreInformation(candidate.decision().references()),
+                            candidate.providerRequestId(), candidate.inputTokens(),
+                            candidate.outputTokens(), candidate.totalTokens());
+                    return commitReviewedCandidate(userId, candidateExecution, fallback, active.call(), review, revision);
+                }
+
+                ObjectNode correctionMetadata = json.object();
+                correctionMetadata.put("sourceCallId", candidateExecution.call().getId().toString());
+                correctionMetadata.put("reviewCallId", active.call().getId().toString());
+                Execution correctionExecution = reserveAdditionalCall(userId, entitlement, active,
+                        ModelCallPurpose.RESULT_REVISION, request.provider(), request.model(),
+                        candidate.decision(), correctionMetadata);
+                if (correctionExecution == null) {
+                    return savedResponse(userId, request.sessionId());
+                }
+                active = correctionExecution;
+                started = System.nanoTime();
+                AgentDecision previous = candidate.decision();
+                candidate = modelClient.revise(requestForCall(request, active), previous, review.issues());
+                validateDecision(candidate == null ? null : candidate.decision());
+                require(candidate.decision().behavior() == AgentBehavior.PRODUCE_RESULT,
+                        HttpStatus.BAD_GATEWAY, INVALID_MODEL_REVISION,
+                        "A correction must return a complete candidate result");
+                candidateExecution = active;
+            }
+            throw new IllegalStateException("Bounded review did not terminate");
+        } catch (RuntimeException failure) {
+            Execution failed = active;
+            int latency = elapsed(started);
+            boolean wasInflight = ModelCallStatus.STARTED.name().equals(failed.call().getStatus());
+            transaction.executeWithoutResult(tx -> recordFailure(userId, failed, latency, failure));
+            if (wasInflight) {
+                telemetry.recordModelOutcome(failed.call().getStatus());
+            }
+            if (failure instanceof ApiException api) {
+                throw api;
+            }
+            throw problem(HttpStatus.BAD_GATEWAY, QUALITY_REVIEW_CALL_FAILED,
+                    "Quality review did not complete; no final result was accepted");
+        }
+    }
+
+    /** 先关闭上一条 STARTED，再预占下一次调用，保持同一执行代次最多一条在途记录。 */
+    private Execution reserveAdditionalCall(
+            UUID userId,
+            EntitlementResponse entitlement,
+            Execution previous,
+            ModelCallPurpose purpose,
+            String provider,
+            String model,
+            AgentDecision candidate,
+            ObjectNode metadata
+    ) {
+        return transaction.execute(tx -> {
+            AgentSession session = owned(userId, previous.session().getId(), true);
+            if (!current(session, previous)) {
+                return null;
+            }
+            requireBudget(session);
+            quota.reserve(userId, entitlement);
+            session.beginExecution(now(), settings.getExecutionTimeoutSeconds());
+            saveSession(session);
+
+            String fingerprint = json.hash(List.of(purpose.name(), provider, model,
+                    previous.base().getId(), candidate, metadata));
+            ModelCall call = ModelCall.start(session, previous.base().getId(), fingerprint,
+                    json.pg(metadata), now(), now());
+            call.setPurpose(purpose.name());
+            call.setProvider(provider);
+            call.setModelName(model);
+            call.setTraceId(telemetry.currentTraceId());
+            calls.insert(call);
+            return new Execution(session, previous.base(), previous.state(), previous.input(), call, previous.history());
+        });
+    }
+
+    private boolean finishCall(
+            UUID userId,
+            Execution execution,
+            String requestId,
+            Integer inputTokens,
+            Integer outputTokens,
+            Integer totalTokens,
+            int latency,
+            ObjectNode metadata
+    ) {
+        Boolean live = transaction.execute(tx -> {
+            AgentSession session = owned(userId, execution.session().getId(), true);
+            boolean accepted = current(session, execution);
+            ModelCall call = execution.call();
+            call.recordUsage(requestId, inputTokens, outputTokens, totalTokens, latency, now());
+            call.setStatus(accepted ? ModelCallStatus.SUCCEEDED.name() : ModelCallStatus.DISCARDED.name());
+            call.setResponseMetadata(json.pg(metadata));
+            calls.updateById(call);
+            return accepted;
+        });
+        telemetry.recordModelOutcome(execution.call().getStatus());
+        return Boolean.TRUE.equals(live);
+    }
+
+    private AgentSessionResponse commitReviewedCandidate(
+            UUID userId,
+            Execution candidate,
+            AgentModelResult result,
+            ModelCall reviewCall,
+            ReviewResult review,
+            int revision
+    ) {
+        ObjectNode summary = json.object();
+        summary.put("verdict", review.verdict().name());
+        summary.put("reviewCallId", reviewCall.getId().toString());
+        summary.put("revisionCount", revision);
+        summary.set("issueCodes", json.node(review.issues().stream().map(issue -> issue.code().name()).toList()));
+        candidate.state().set("qualityReview", summary);
+        AgentSessionResponse response = transaction.execute(tx -> {
+            ObjectNode callMetadata = json.object(candidate.call().getResponseMetadata());
+            callMetadata.set("qualityReview", summary);
+            candidate.call().setResponseMetadata(json.pg(callMetadata));
+            return completeExecution(userId, candidate, result, candidate.call().getLatencyMs(), true);
+        });
+        if (candidate.call().getStepId() != null) {
+            telemetry.recordDecision(result.decision().behavior().name());
+        }
+        return response;
+    }
+
+    private AgentSessionResponse savedResponse(UUID userId, UUID sessionId) {
+        return transaction.execute(tx -> {
+            AgentSession session = owned(userId, sessionId, false);
+            return response(session, checkpoint(session, session.getActiveCheckpointId()));
+        });
+    }
+
+    private AgentModelRequest requestForCall(AgentModelRequest original, Execution execution) {
+        ObjectNode state = ((ObjectNode) original.state()).deepCopy();
+        state.put("remainingModelCalls", execution.session().getMaxModelCalls()
+                - execution.session().getTotalModelCalls());
+        return new AgentModelRequest(original.sessionId(), original.provider(), original.model(), original.locale(),
+                original.inputSnapshot(), state, original.history(), original.pictures());
+    }
+
+    private AgentDecision requestMoreInformation(List<AgentDecision.Reference> references) {
+        AgentQuestion question = new AgentQuestion(
+                UUID.randomUUID(), "quality_review.additional_context",
+                "请补充目前尚未说明或需要修正的情况；如果不确定，可以填写“不确定”。",
+                "当前候选结果未通过内容评审，系统暂不形成结论。", AgentAnswerType.TEXT, List.of(), true);
+        return new AgentDecision(AgentBehavior.NARROW_DOWN,
+                "当前信息还不足以形成可靠的整理结果，需要你进一步补充或确认。",
+                question, json.object(), List.of(), null, references);
+    }
+
+    private void validateReview(ReviewResult review) {
+        require(review != null && review.verdict() != null && review.issues().size() <= 5
+                        && review.issues().stream().allMatch(issue -> issue != null && issue.code() != null
+                                && issue.reason() != null && !issue.reason().isBlank() && issue.reason().length() <= 500)
+                        && (review.verdict() == ReviewVerdict.ACCEPT ? review.issues().isEmpty() : !review.issues().isEmpty()),
+                HttpStatus.BAD_GATEWAY, INVALID_QUALITY_REVIEW_OUTPUT, "The reviewer returned an invalid verdict");
     }
 
     @Override
@@ -688,6 +919,9 @@ public class AgentServiceImpl implements AgentService {
                 "Answer the saved question before advancing");
         requireBudget(session);
         modelClient.requireAvailable(session.getModelProvider(), session.getModelName());
+        if (reviewSettings.isEnabled()) {
+            reviewer.requireAvailable(session.getModelProvider(), session.getModelName());
+        }
 
         quota.reserve(userId, entitlement);
         invalidateExecution(session);
@@ -736,19 +970,36 @@ public class AgentServiceImpl implements AgentService {
             AgentModelResult result,
             int latency
     ) {
+        return completeExecution(userId, execution, result, latency, false);
+    }
+
+    private AgentSessionResponse completeExecution(
+            UUID userId,
+            Execution execution,
+            AgentModelResult result,
+            int latency,
+            boolean callAlreadyRecorded
+    ) {
         AgentSession session = owned(userId, execution.session().getId(), true);
         ModelCall call = execution.call();
-        call.recordResponse(result, latency, now());
+        if (!callAlreadyRecorded) {
+            call.recordResponse(result, latency, now());
+        }
 
         if (!current(session, execution)) {
-            call.setStatus(ModelCallStatus.DISCARDED.name());
-            calls.updateById(call);
+            if (!callAlreadyRecorded) {
+                call.setStatus(ModelCallStatus.DISCARDED.name());
+                calls.updateById(call);
+            }
 
             return response(session, checkpoint(session, session.getActiveCheckpointId()));
         }
 
         AgentDecision decision = result.decision();
         ObjectNode next = execution.state().deepCopy();
+        if (!callAlreadyRecorded) {
+            next.remove("qualityReview");
+        }
         ObjectNode facts =
                 next.path("facts").isObject() ? (ObjectNode) next.path("facts") : json.object();
 
@@ -844,6 +1095,7 @@ public class AgentServiceImpl implements AgentService {
         state.set("answers", answers);
         state.remove("pendingQuestion");
         state.remove("outcome");
+        state.remove("qualityReview");
 
         AgentCheckpoint point = saveCheckpoint(session, step, state);
         session.acceptCheckpoint(point.getId(), AgentSessionStatus.CREATED, now());
@@ -870,16 +1122,23 @@ public class AgentServiceImpl implements AgentService {
             category = ModelCallErrorCategory.MODEL_TRANSPORT_OR_OUTPUT;
             errorCode = MODEL_CALL_FAILED.code();
         }
-        call.recordFailure(category, errorCode, latency, now());
+        boolean inflight = ModelCallStatus.STARTED.name().equals(call.getStatus());
+        if (inflight) {
+            call.recordFailure(category, errorCode, latency, now());
+        }
 
         if (current(session, execution)) {
-            call.setStatus(ModelCallStatus.FAILED.name());
+            if (inflight) {
+                call.setStatus(ModelCallStatus.FAILED.name());
+            }
             session.failExecution(errorCode, now());
             saveSession(session);
-        } else {
+        } else if (inflight) {
             call.setStatus(ModelCallStatus.DISCARDED.name());
         }
-        calls.updateById(call);
+        if (inflight) {
+            calls.updateById(call);
+        }
     }
 
     private AgentStep newStep(

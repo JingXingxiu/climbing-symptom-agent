@@ -7,7 +7,7 @@
 | 记录 | 回答的问题 | 保存位置 |
 | --- | --- | --- |
 | Session、Step、Checkpoint | 任务到哪一步、当前分支是什么、退出后从哪里继续 | AI PostgreSQL；属于业务状态 |
-| ModelCall | 哪一代执行发起了调用、是否采纳、平台、Token、错误和 Trace ID | AI PostgreSQL；属于适度的调用元数据 |
+| ModelCall | 哪一代执行发起了哪种模型调用、平台、Token、错误和 Trace ID；结合步骤与评审元数据判断最终采纳 | AI PostgreSQL；属于适度的调用元数据 |
 | Trace / Span、指标 | 一次执行内部各阶段的先后与耗时；一段时间内的成功、失败和调用分布 | 应用内指标与可选 Jaeger；用于观测 |
 
 Checkpoint 不记录每个函数调用。Span 也不能替代事务、幂等键、执行代次或 Checkpoint：即使没有监控服务，业务状态仍由原来的数据库逻辑决定。
@@ -57,6 +57,8 @@ GET /api/ai/v1/agent-sessions/{sessionId}/observations
 ```
 
 这个接口沿用当前用户身份与 Session 归属校验。它返回业务步骤与脱敏调用元数据，用于关联任务及 Jaeger 查询，不返回完整 Prompt、答案原文、图片签名 URL 或密钥。
+
+最终结果评审启用后，一轮执行还可能出现 B 评审、A 纠正和 B 复审。每次实际请求独立记录 ModelCall 与预算，用 `purpose` 区分 `NEXT_SYMPTOM_STEP`、`QUALITY_REVIEW`、`RESULT_REVISION`。观测响应只读取白名单 `reviewVerdict` 和 `reviewIssueCodes`，不暴露 B 的理由原文。`SUCCEEDED` 表示单次合法返回；B 返回 REVISE 的调用也可以成功，不能把该状态等同候选通过或 History 已完成定稿。详见 [模型评审流程](agent-review.md)。
 
 Jaeger 中选择 `ai-service`，查找刚刚的请求或 Trace ID。一次执行会拆出 `agent.*` 阶段，例如联网检索、图片读取、模型请求和输出校验。工具未启用、工具不可用、模型请求失败、结构化结果不合法、旧响应未被采纳，需要结合各阶段状态和持久化记录区分。失败可以结束一个 Span；工具返回“不可用”也应有明确结果标记。
 

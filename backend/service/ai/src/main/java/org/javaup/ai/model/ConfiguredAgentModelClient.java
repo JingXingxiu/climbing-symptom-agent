@@ -3,8 +3,10 @@ package org.javaup.ai.model;
 import static org.javaup.ai.api.problem.AIErrorCode.*;
 
 import java.util.Objects;
+import java.util.List;
 
 import org.javaup.ai.api.problem.ApiException;
+import org.javaup.ai.review.ReviewIssue;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 
@@ -28,6 +30,10 @@ public class ConfiguredAgentModelClient implements AgentModelClient {
             String provider,
             String model
     ) {
+        configuredProfile(provider, model);
+    }
+
+    public AgentModelProperties.Profile configuredProfile(String provider, String model) {
         AgentModelProperties.Profile profile = find(provider, model);
 
         if (profile.getApiKey() == null
@@ -39,13 +45,17 @@ public class ConfiguredAgentModelClient implements AgentModelClient {
                     MODEL_NOT_CONFIGURED,
                     "Selected model has no configured endpoint or credentials.");
         }
+        return profile;
     }
 
     @Override
     public AgentModelResult analyze(AgentModelRequest request) {
-        requireAvailable(request.provider(), request.model());
+        return real.analyze(request, configuredProfile(request.provider(), request.model()));
+    }
 
-        return real.analyze(request, find(request.provider(), request.model()));
+    @Override
+    public AgentModelResult revise(AgentModelRequest request, AgentDecision candidate, List<ReviewIssue> issues) {
+        return real.revise(request, candidate, issues, configuredProfile(request.provider(), request.model()));
     }
 
     private AgentModelProperties.Profile find(

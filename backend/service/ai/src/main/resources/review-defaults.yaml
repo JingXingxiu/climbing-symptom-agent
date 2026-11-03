@@ -1,0 +1,5 @@
+ai:
+  review:
+    enabled: ${AI_REVIEW_ENABLED:false}
+    provider: ${AI_REVIEW_PROVIDER:}
+    model: ${AI_REVIEW_MODEL:}

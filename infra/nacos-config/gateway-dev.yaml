@@ -36,7 +36,7 @@ spring:
             - id: ai-service-route
               uri: lb://ai-service
               metadata:
-                response-timeout: 150000
+                response-timeout: 240000
               predicates:
                 - Path=/api/ai/**
             - id: payment-service-route

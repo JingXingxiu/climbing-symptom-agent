@@ -106,6 +106,12 @@ public class AgentTelemetry {
                 OUTCOMES.contains(normalized) ? normalized : "other").increment();
     }
 
+    public void recordReviewVerdict(String verdict) {
+        String value = normalize(verdict);
+        meters.counter("agent.review.verdicts", "verdict",
+                Set.of("accept", "revise", "abstain").contains(value) ? value : "other").increment();
+    }
+
     public void recordTokens(String provider, String model, Integer input, Integer output) {
         incrementTokens(provider, model, "input", input);
         incrementTokens(provider, model, "output", output);

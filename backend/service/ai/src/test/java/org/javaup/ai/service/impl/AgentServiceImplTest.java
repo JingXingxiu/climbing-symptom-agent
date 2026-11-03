@@ -18,6 +18,12 @@ import org.javaup.ai.entity.*;
 import org.javaup.ai.mapper.*;
 import org.javaup.ai.model.*;
 import org.javaup.ai.observability.AgentTelemetry;
+import org.javaup.ai.review.ReviewClient;
+import org.javaup.ai.review.ReviewIssue;
+import org.javaup.ai.review.ReviewIssueCode;
+import org.javaup.ai.review.ReviewProperties;
+import org.javaup.ai.review.ReviewResult;
+import org.javaup.ai.review.ReviewVerdict;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.micrometer.observation.ObservationRegistry;
 import org.javaup.ai.service.AgentAssessmentBridge;
@@ -26,6 +32,8 @@ import org.javaup.ai.service.AgentQuotaService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.BeanUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.transaction.support.SimpleTransactionStatus;
@@ -69,6 +77,8 @@ class AgentServiceImplTest {
     private final ModelCallMapper calls = mock(ModelCallMapper.class);
     private final AgentAssessmentBridge bridge = mock(AgentAssessmentBridge.class);
     private final AgentModelClient model = mock(AgentModelClient.class);
+    private final ReviewClient reviewer = mock(ReviewClient.class);
+    private final ReviewProperties reviewSettings = new ReviewProperties();
     private final AgentPaymentClient payment = mock(AgentPaymentClient.class);
     private final UserDailyUsageMapper usage = mock(UserDailyUsageMapper.class);
     private final Map<LocalDate, Integer> usageRows = new LinkedHashMap<>();
@@ -112,7 +122,9 @@ class AgentServiceImplTest {
                         settings,
                         json,
                         Clock.fixed(TIME, ZoneOffset.UTC),
-                        telemetry);
+                        telemetry,
+                        reviewer,
+                        reviewSettings);
         when(payment.getEntitlement(userId)).thenAnswer(invocation -> {
             assertFalse(inTransaction, "Payment must be queried outside the execution transaction");
             return new EntitlementResponse(userId, "FREE", "免费", 10, null);
@@ -302,6 +314,12 @@ class AgentServiceImplTest {
                 .thenAnswer(
                         invocation -> {
                             ModelCall row = invocation.getArgument(0);
+                            assertTrue(inTransaction, "Every model call must be reserved in a short transaction");
+                            assertFalse(callRows.values().stream().anyMatch(old ->
+                                            old.getSessionId().equals(row.getSessionId())
+                                                    && Objects.equals(old.getExecutionGeneration(), row.getExecutionGeneration())
+                                                    && "STARTED".equals(old.getStatus())),
+                                    "An execution generation may have at most one STARTED call");
                             callRows.put(row.getId(), copy(row));
                             return 1;
                         });
@@ -335,7 +353,10 @@ class AgentServiceImplTest {
         when(bridge.resolvePictures(eq(userId), any())).thenReturn(List.of());
         FakeAgentModel fake = new FakeAgentModel(mapper);
         when(model.analyze(any()))
-                .thenAnswer(invocation -> fake.analyze(invocation.getArgument(0)));
+                .thenAnswer(invocation -> {
+                    assertFalse(inTransaction, "Primary model I/O must be outside transactions");
+                    return fake.analyze(invocation.getArgument(0));
+                });
     }
 
     @AfterEach
@@ -904,6 +925,244 @@ class AgentServiceImplTest {
         verify(model, never()).analyze(any());
         assertEquals(1, usageRows.get(LocalDate.of(2026, 10, 27)));
         assertEquals("FAILED", callRows.values().iterator().next().getStatus());
+    }
+
+    @Test
+    void enabledReviewDoesNotReviewOrdinaryQuestions() {
+        enableReview();
+
+        AgentSessionResponse waiting = advance(create());
+
+        assertEquals(AgentSessionStatus.WAITING_FOR_USER, waiting.status());
+        assertEquals(1, callRows.size());
+        assertEquals(1, waiting.totalModelCalls());
+        verify(reviewer, never()).review(any(), any());
+        verify(model, never()).revise(any(), any(), any());
+    }
+
+    @Test
+    void acceptedCandidateUsesTwoIndependentCallsAndOneFinalCheckpoint() {
+        enableReview();
+        primaryReturns(finalCandidate("approved"));
+        reviewerReturns(ReviewVerdict.ACCEPT);
+
+        AgentSessionResponse completed = advance(create());
+
+        assertEquals(AgentSessionStatus.COMPLETED, completed.status());
+        assertEquals(2, completed.totalModelCalls());
+        assertEquals(2, usageRows.get(LocalDate.of(2026, 10, 27)));
+        assertEquals(List.of("NEXT_SYMPTOM_STEP", "QUALITY_REVIEW"), callPurposes());
+        assertTrue(callRows.values().stream().allMatch(call -> "SUCCEEDED".equals(call.getStatus())));
+        assertEquals(1, stepRows.size());
+        assertEquals(2, checkpointRows.size());
+        assertEquals("approved", service.getAgentOutcome(userId, completed.sessionId()).summary());
+        assertEquals("ACCEPT", activeState(completed).path("qualityReview").path("verdict").asText());
+    }
+
+    @Test
+    void oneCorrectionAndReReviewUseAtMostFourCallsAndNeverCommitRejectedFacts() {
+        enableReview();
+        primaryReturns(finalCandidate("rejected"));
+        reviewerReturns(ReviewVerdict.REVISE, ReviewVerdict.ACCEPT);
+        when(model.revise(any(), any(), any())).thenAnswer(invocation -> {
+            assertFalse(inTransaction, "Correction I/O must be outside transactions");
+            assertEquals(3, callRows.size());
+            assertTrue(stepRows.isEmpty());
+            assertEquals(1, checkpointRows.size());
+            return finalCandidate("corrected");
+        });
+
+        AgentSessionResponse completed = advance(create());
+
+        assertEquals(AgentSessionStatus.COMPLETED, completed.status());
+        assertEquals(4, completed.totalModelCalls());
+        assertEquals(4, usageRows.get(LocalDate.of(2026, 10, 27)));
+        assertEquals(List.of("NEXT_SYMPTOM_STEP", "QUALITY_REVIEW", "RESULT_REVISION", "QUALITY_REVIEW"), callPurposes());
+        assertEquals(1, stepRows.size());
+        assertEquals(2, checkpointRows.size());
+        assertFalse(activeState(completed).path("facts").has("rejected"));
+        assertTrue(activeState(completed).path("facts").path("corrected").asBoolean());
+        assertEquals(1, activeState(completed).path("qualityReview").path("revisionCount").asInt());
+        verify(model, times(1)).revise(any(), any(), any());
+        verify(reviewer, times(2)).review(any(), any());
+    }
+
+    @Test
+    void abstentionAsksForInformationWithoutAcceptingRejectedCandidateFacts() {
+        enableReview();
+        primaryReturns(finalCandidate("rejected"));
+        reviewerReturns(ReviewVerdict.ABSTAIN);
+
+        AgentSessionResponse waiting = advance(create());
+
+        assertEquals(AgentSessionStatus.WAITING_FOR_USER, waiting.status());
+        assertEquals("quality_review.additional_context", waiting.question().questionKey());
+        assertFalse(activeState(waiting).has("outcome"));
+        assertFalse(activeState(waiting).path("facts").has("rejected"));
+        assertEquals(2, waiting.totalModelCalls());
+        assertFalse(callRows.values().stream().anyMatch(call ->
+                call.getResponseMetadata().getValue().contains("PRIVATE_REVIEW_REASON")));
+        verify(model, never()).revise(any(), any(), any());
+    }
+
+    @Test
+    void secondRevisionVerdictStopsAtFourCallsAndAsksForInformation() {
+        enableReview();
+        primaryReturns(finalCandidate("rejected"));
+        reviewerReturns(ReviewVerdict.REVISE, ReviewVerdict.REVISE);
+        when(model.revise(any(), any(), any())).thenAnswer(invocation -> {
+            assertFalse(inTransaction);
+            return finalCandidate("still_rejected");
+        });
+
+        AgentSessionResponse waiting = advance(create());
+
+        assertEquals(AgentSessionStatus.WAITING_FOR_USER, waiting.status());
+        assertEquals(4, waiting.totalModelCalls());
+        assertFalse(activeState(waiting).has("outcome"));
+        assertFalse(activeState(waiting).path("facts").has("rejected"));
+        assertFalse(activeState(waiting).path("facts").has("still_rejected"));
+        verify(model, times(1)).revise(any(), any(), any());
+        verify(reviewer, times(2)).review(any(), any());
+    }
+
+    @Test
+    void reviewProviderFailureFailsClosedAndLeavesTheOriginalCheckpoint() {
+        enableReview();
+        primaryReturns(finalCandidate("unreviewed"));
+        when(reviewer.review(any(), any())).thenAnswer(invocation -> {
+            assertFalse(inTransaction);
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "QUALITY_REVIEW_CALL_FAILED", "provider unavailable");
+        });
+        AgentSessionResponse created = create();
+
+        assertCode("QUALITY_REVIEW_CALL_FAILED", () -> advance(created));
+
+        AgentSessionResponse failed = service.getAgentSession(userId, created.sessionId());
+        assertEquals(AgentSessionStatus.FAILED, failed.status());
+        assertEquals(created.activeCheckpointId(), failed.activeCheckpointId());
+        assertTrue(stepRows.isEmpty());
+        assertEquals(List.of("SUCCEEDED", "FAILED"), callRows.values().stream().map(ModelCall::getStatus).toList());
+        assertEquals(2, failed.totalModelCalls());
+        assertEquals(2, usageRows.get(LocalDate.of(2026, 10, 27)));
+        verify(model, never()).revise(any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void noCorrectionRequestIsSentWhenTheThirdCallCannotReserveBudget(boolean dailyQuota) {
+        enableReview();
+        if (dailyQuota) {
+            when(payment.getEntitlement(userId)).thenAnswer(invocation -> {
+                assertFalse(inTransaction);
+                return new EntitlementResponse(userId, "FREE", "free", 2, null);
+            });
+        } else {
+            settings.setMaxModelCalls(2);
+        }
+        primaryReturns(finalCandidate("unreviewed"));
+        reviewerReturns(ReviewVerdict.REVISE);
+        AgentSessionResponse created = create();
+
+        assertCode(dailyQuota ? "AI_DAILY_QUOTA_EXCEEDED" : "MODEL_BUDGET_EXHAUSTED", () -> advance(created));
+
+        AgentSessionResponse failed = service.getAgentSession(userId, created.sessionId());
+        assertEquals(AgentSessionStatus.FAILED, failed.status());
+        assertEquals(2, failed.totalModelCalls());
+        assertEquals(2, callRows.size());
+        assertEquals(2, usageRows.get(LocalDate.of(2026, 10, 27)));
+        assertEquals(created.activeCheckpointId(), failed.activeCheckpointId());
+        verify(model, never()).revise(any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"review", "correction"})
+    void pausingDuringReviewOrCorrectionDiscardsTheLateCallAndStopsThePipeline(String phase) {
+        enableReview();
+        primaryReturns(finalCandidate("rejected"));
+        AgentSessionResponse created = create();
+        if ("review".equals(phase)) {
+            when(reviewer.review(any(), any())).thenAnswer(invocation -> {
+                assertFalse(inTransaction);
+                pauseCurrent(created.sessionId());
+                return reviewResult(ReviewVerdict.REVISE);
+            });
+        } else {
+            reviewerReturns(ReviewVerdict.REVISE);
+            when(model.revise(any(), any(), any())).thenAnswer(invocation -> {
+                assertFalse(inTransaction);
+                pauseCurrent(created.sessionId());
+                return finalCandidate("late_correction");
+            });
+        }
+
+        AgentSessionResponse paused = advance(created);
+
+        int expectedCalls = "review".equals(phase) ? 2 : 3;
+        assertEquals(AgentSessionStatus.PAUSED, paused.status());
+        assertEquals(created.activeCheckpointId(), paused.activeCheckpointId());
+        assertEquals(expectedCalls, callRows.size());
+        assertEquals(expectedCalls, paused.totalModelCalls());
+        assertEquals(expectedCalls, usageRows.get(LocalDate.of(2026, 10, 27)));
+        assertEquals("DISCARDED", callRows.values().stream().toList().getLast().getStatus());
+        assertTrue(stepRows.isEmpty());
+        assertEquals(1, checkpointRows.size());
+        verify(reviewer, times(1)).review(any(), any());
+        verify(model, times("review".equals(phase) ? 0 : 1)).revise(any(), any(), any());
+    }
+
+    private void enableReview() {
+        reviewSettings.setEnabled(true);
+        reviewSettings.setProvider("qwen");
+        reviewSettings.setModel("reviewer");
+    }
+
+    private void primaryReturns(AgentModelResult result) {
+        doAnswer(invocation -> {
+            assertFalse(inTransaction, "Primary I/O must not hold a transaction");
+            return result;
+        }).when(model).analyze(any());
+    }
+
+    private void reviewerReturns(ReviewVerdict... verdicts) {
+        java.util.concurrent.atomic.AtomicInteger index = new java.util.concurrent.atomic.AtomicInteger();
+        when(reviewer.review(any(), any())).thenAnswer(invocation -> {
+            assertFalse(inTransaction, "Reviewer I/O must not hold a transaction");
+            int position = index.getAndIncrement();
+            assertTrue(position < verdicts.length, "No implicit extra review call is allowed");
+            return reviewResult(verdicts[position]);
+        });
+    }
+
+    private ReviewResult reviewResult(ReviewVerdict verdict) {
+        return new ReviewResult(verdict,
+                verdict == ReviewVerdict.ACCEPT ? List.of()
+                        : List.of(new ReviewIssue(ReviewIssueCode.UNSUPPORTED_CLAIM, "PRIVATE_REVIEW_REASON")),
+                "review-request", 6, 3, 9);
+    }
+
+    private AgentModelResult finalCandidate(String marker) {
+        ObjectNode facts = json.object();
+        facts.put(marker, true);
+        return new AgentModelResult(new AgentDecision(
+                AgentBehavior.PRODUCE_RESULT, "Candidate " + marker, null, facts, List.of(),
+                new AgentDecision.OutcomeDraft(RecommendationLevel.ROUTINE_PROFESSIONAL,
+                        marker, List.of("Information remains uncertain"),
+                        List.of("Seek professional help when needed"), List.of(), "Limited input"), List.of()),
+                "primary-request", 10, 5, 15);
+    }
+
+    private JsonNode activeState(AgentSessionResponse response) {
+        return json.object(checkpointRows.get(response.activeCheckpointId()).getState());
+    }
+
+    private List<String> callPurposes() {
+        return callRows.values().stream().map(ModelCall::getPurpose).toList();
+    }
+
+    private void pauseCurrent(UUID sessionId) {
+        AgentSessionResponse running = service.getAgentSession(userId, sessionId);
+        service.pauseSession(userId, sessionId, version(running));
     }
 
     private CreateAgentSessionRequest request() {

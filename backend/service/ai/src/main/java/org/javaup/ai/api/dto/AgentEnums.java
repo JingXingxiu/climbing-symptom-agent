@@ -79,7 +79,7 @@ public final class AgentEnums {
     public enum ModelCallStatus {
         /** 已预占调用预算，等待外部模型返回。 */
         STARTED,
-        /** 调用成功并被当前执行接受。 */
+        /** 当前执行内获得合法输出；候选是否最终被采纳还要看 Step 和评审元数据。 */
         SUCCEEDED,
         /** 模型调用失败。 */
         FAILED,
@@ -98,7 +98,11 @@ public final class AgentEnums {
     /** 模型调用用于完成哪一类业务任务。 */
     public enum ModelCallPurpose {
         /** 推进下一步症状分析。 */
-        NEXT_SYMPTOM_STEP
+        NEXT_SYMPTOM_STEP,
+        /** 评审最终候选结果；不等同于临床正确性确认。 */
+        QUALITY_REVIEW,
+        /** 根据评审意见进行一次有界纠正。 */
+        RESULT_REVISION
     }
 
     /** 模型执行失败的粗粒度分类，具体原因保存在错误码中。 */

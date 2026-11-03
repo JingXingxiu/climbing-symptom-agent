@@ -11,6 +11,7 @@
 - 点选、画圈、自由绘制与归一化 Annotation；
 - 有限步骤 Mock Agent，包含正常追问和矛盾确认；
 - Agent 后端参考实现：暂停恢复、历史改答分叉、可替换模型、识图与可选联网检索、History 结果定稿；
+- 可配置最终结果评审：B 检查 A 的候选，最多一次纠正与复审，复用调用预算和观测；附默认不调用外部 API 的合成案例评测入口；
 - 本地历史、草稿及步骤恢复；
 - 独立 `payment-service`：模拟套餐购买、幂等支付确认、权益续期和 AI 每日额度；
 - `base_db`、`image_db`、`history_db`、`payment_db` 当前 SQL；
@@ -52,6 +53,7 @@ docker compose up -d --build --wait
 - [模拟支付与 AI 额度](docs/payment-service.md)
 - [Sentinel 限流与熔断](docs/sentinel.md)
 - [Agent 行为观测与 Jaeger](docs/agent-observability.md)
+- [最终结果模型评审与固定案例](docs/agent-review.md)
 - [RAG 检索与空库行为](docs/rag.md)
 - [开源资源与 License](docs/open-source-and-licenses.md)
 - [早期 Terra Java 后端模板 Prompt](docs/history/2026-09-29-pre-development/terra-backend-template-prompt.md)

@@ -862,7 +862,7 @@ export class HttpAssessmentApi implements AssessmentApi {
         'POST',
         { expectedVersion: current.version },
         undefined,
-        150_000,
+        250_000,
       )
       this.agentResponses.set(current.sessionId, current)
     }

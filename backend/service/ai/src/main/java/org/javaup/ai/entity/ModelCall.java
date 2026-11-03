@@ -129,12 +129,25 @@ public class ModelCall {
             int latencyMs,
             OffsetDateTime completedAt
     ) {
+        recordUsage(result.providerRequestId(), result.inputTokens(), result.outputTokens(),
+                result.totalTokens(), latencyMs, completedAt);
+    }
+
+    /** 通用调用统计；评审没有 AgentDecision，也使用同一张调用账本。 */
+    public void recordUsage(
+            String requestId,
+            Integer input,
+            Integer output,
+            Integer total,
+            int latencyMs,
+            OffsetDateTime completedAt
+    ) {
         setCompletedAt(completedAt);
         setLatencyMs(latencyMs);
-        setProviderRequestId(result.providerRequestId());
-        setInputTokens(nonNegative(result.inputTokens()));
-        setOutputTokens(nonNegative(result.outputTokens()));
-        setTotalTokens(nonNegative(result.totalTokens()));
+        setProviderRequestId(requestId);
+        setInputTokens(nonNegative(input));
+        setOutputTokens(nonNegative(output));
+        setTotalTokens(nonNegative(total));
     }
 
     /** 记录失败信息；有效执行与过期执行的状态仍由 Service 区分。 */

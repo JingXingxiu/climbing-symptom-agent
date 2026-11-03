@@ -32,6 +32,7 @@ public record AgentObservationResponse(
             long executionGeneration,
             String provider,
             String model,
+            String purpose,
             String status,
             String traceId,
             Integer executionLatencyMs,
@@ -40,6 +41,8 @@ public record AgentObservationResponse(
             Integer totalTokens,
             String errorCategory,
             String errorCode,
+            String reviewVerdict,
+            List<String> reviewIssueCodes,
             OffsetDateTime startedAt,
             OffsetDateTime completedAt
     ) {}

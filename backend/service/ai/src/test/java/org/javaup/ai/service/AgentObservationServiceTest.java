@@ -28,7 +28,9 @@ class AgentObservationServiceTest {
     private final AgentStepMapper steps = mock(AgentStepMapper.class);
     private final AgentCheckpointMapper checkpoints = mock(AgentCheckpointMapper.class);
     private final ModelCallMapper calls = mock(ModelCallMapper.class);
-    private final AgentObservationService service = new AgentObservationService(sessions, steps, checkpoints, calls);
+    private final AgentObservationService service = new AgentObservationService(
+            sessions, steps, checkpoints, calls,
+            new AgentJson(JsonMapper.builder().findAndAddModules().build()));
 
     @Test
     void deniesAnotherOwnerBeforeReadingAnyExecutionData() {
